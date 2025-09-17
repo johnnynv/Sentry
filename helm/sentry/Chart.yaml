@@ -1,0 +1,23 @@
+apiVersion: v2
+name: sentry
+description: A Helm chart for Sentry - Tekton Pipeline Auto-Deployer
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+home: https://github.com/your-org/sentry
+sources:
+  - https://github.com/your-org/sentry
+maintainers:
+  - name: Sentry Team
+    email: sentry@your-org.com
+keywords:
+  - tekton
+  - kubernetes
+  - automation
+  - ci-cd
+  - deployment
+annotations:
+  category: CI/CD
+  images: |
+    - name: sentry
+      image: localhost:5000/sentry:1.0.0

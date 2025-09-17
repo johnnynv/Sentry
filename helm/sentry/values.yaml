@@ -1,0 +1,180 @@
+# Default values for sentry
+# This is a YAML-formatted file
+
+# Application metadata
+nameOverride: ""
+fullnameOverride: ""
+
+# Image configuration
+image:
+  repository: localhost:5000/sentry
+  pullPolicy: IfNotPresent
+  tag: "1.0.0"
+
+# Image pull secrets
+imagePullSecrets: []
+
+# Service account configuration
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use
+  name: ""
+
+# Pod annotations
+podAnnotations: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+    - ALL
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+# Autoscaling configuration
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity
+affinity: {}
+
+# Replica count
+replicaCount: 1
+
+# Namespace configuration
+namespace:
+  create: true
+  name: sentry-system
+
+# Application configuration
+config:
+  # Monitoring configuration
+  monitor:
+    # Repository A (GitHub example)
+    repo_a:
+      type: "github"
+      url: "https://github.com/NVIDIA-AI-Blueprints/rag"
+      branch: "main"
+      token: "${GITHUB_TOKEN}"
+    
+    # Repository B (GitLab example)
+    repo_b:
+      type: "gitlab"
+      url: "https://gitlab-master.nvidia.com/cloud-service-qa/Blueprint/blueprint-github-test"
+      branch: "main"
+      token: "${GITLAB_TOKEN}"
+    
+    # Polling configuration
+    poll:
+      interval: 30  # Poll interval in seconds
+      timeout: 10   # Request timeout in seconds
+
+  # Deployment configuration
+  deploy:
+    namespace: "tekton-pipelines"  # Target namespace for Tekton resources
+    tmp_dir: "/tmp/sentry"         # Temporary directory
+    cleanup: true                  # Auto-cleanup temporary files
+
+# Secret configuration
+secrets:
+  # GitHub token (base64 encoded)
+  githubToken: ""
+  # GitLab token (base64 encoded)
+  gitlabToken: ""
+  # Create secret from values
+  create: true
+  # Use existing secret
+  existingSecret: ""
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+  # Additional rules
+  additionalRules: []
+
+# Deployment strategy
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 1
+    maxSurge: 1
+
+# Health checks
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 60
+  timeoutSeconds: 10
+  failureThreshold: 3
+  command:
+    - sentry
+    - -action=validate
+    - -config=/etc/sentry/sentry.yaml
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 1
+  command:
+    - sentry
+    - -action=validate
+    - -config=/etc/sentry/sentry.yaml
+
+# Additional environment variables
+env: []
+# - name: CUSTOM_VAR
+#   value: "custom_value"
+
+# Additional volumes
+extraVolumes: []
+# - name: extra-volume
+#   emptyDir: {}
+
+# Additional volume mounts
+extraVolumeMounts: []
+# - name: extra-volume
+#   mountPath: /extra-path
+
+# Command line arguments
+args:
+  - "-action=watch"
+  - "-verbose"
+  - "-config=/etc/sentry/sentry.yaml"
+
+# Enable verbose logging
+verbose: true
+
+# Termination grace period
+terminationGracePeriodSeconds: 30

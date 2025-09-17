@@ -1,0 +1,37 @@
+1. Get the application name:
+  echo "Application: {{ include "sentry.fullname" . }}"
+
+2. Check deployment status:
+  kubectl get deployment {{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }}
+
+3. View application logs:
+  kubectl logs -f deployment/{{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }}
+
+4. Validate configuration:
+  kubectl exec -it deployment/{{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }} -- \
+    sentry -action=validate -config=/etc/sentry/sentry.yaml
+
+5. Manually trigger deployment:
+  kubectl exec -it deployment/{{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }} -- \
+    sentry -action=trigger -config=/etc/sentry/sentry.yaml
+
+{{- if .Values.secrets.create }}
+{{- if not .Values.secrets.githubToken }}
+WARNING: GitHub token not provided. Set secrets.githubToken in values.yaml
+{{- end }}
+{{- if not .Values.secrets.gitlabToken }}
+WARNING: GitLab token not provided. Set secrets.gitlabToken in values.yaml
+{{- end }}
+{{- end }}
+
+Configuration:
+- Namespace: {{ include "sentry.namespace" . }}
+- Image: {{ include "sentry.image" . }}
+- Service Account: {{ include "sentry.serviceAccountName" . }}
+{{- if .Values.autoscaling.enabled }}
+- Autoscaling: Enabled ({{ .Values.autoscaling.minReplicas }}-{{ .Values.autoscaling.maxReplicas }} replicas)
+{{- else }}
+- Replicas: {{ .Values.replicaCount }}
+{{- end }}
+
+For more information, visit the project documentation.

@@ -1,0 +1,47 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sentry
+  namespace: sentry-system
+  labels:
+    app.kubernetes.io/name: sentry
+    app.kubernetes.io/component: serviceaccount
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sentry-role
+  labels:
+    app.kubernetes.io/name: sentry
+    app.kubernetes.io/component: clusterrole
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list"]
+- apiGroups: ["tekton.dev"]
+  resources: ["pipelines", "pipelineruns", "tasks", "taskruns"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+- apiGroups: ["triggers.tekton.dev"]
+  resources: ["triggerbindings", "triggertemplates", "eventlisteners"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+  resourceNames: ["sentry-config", "sentry-tokens"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sentry-rolebinding
+  labels:
+    app.kubernetes.io/name: sentry
+    app.kubernetes.io/component: clusterrolebinding
+subjects:
+- kind: ServiceAccount
+  name: sentry
+  namespace: sentry-system
+roleRef:
+  kind: ClusterRole
+  name: sentry-role
+  apiGroup: rbac.authorization.k8s.io
+---

@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sentry
+  namespace: sentry-system
+  labels:
+    app.kubernetes.io/name: sentry
+    app.kubernetes.io/component: deployment
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sentry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sentry
+        app.kubernetes.io/component: deployment
+        app.kubernetes.io/version: "1.0.0"
+    spec:
+      serviceAccountName: sentry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+      - name: sentry
+        image: localhost:5000/sentry:1.0.0
+        imagePullPolicy: IfNotPresent
+        command: ["sentry"]
+        args: ["-action=watch", "-verbose", "-config=/etc/sentry/sentry.yaml"]
+        env:
+        - name: GITHUB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sentry-tokens
+              key: github-token
+        - name: GITLAB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: sentry-tokens
+              key: gitlab-token
+        - name: SENTRY_TMP_DIR
+          value: "/tmp/sentry"
+        volumeMounts:
+        - name: config
+          mountPath: /etc/sentry
+          readOnly: true
+        - name: tmp
+          mountPath: /tmp/sentry
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - sentry
+            - -action=validate
+            - -config=/etc/sentry/sentry.yaml
+          initialDelaySeconds: 30
+          periodSeconds: 60
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - sentry
+            - -action=validate
+            - -config=/etc/sentry/sentry.yaml
+          initialDelaySeconds: 10
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 1
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: config
+        configMap:
+          name: sentry-config
+      - name: tmp
+        emptyDir: {}
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+---

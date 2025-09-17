@@ -1,0 +1,117 @@
+# Production values for sentry
+# Override default values for production deployment
+
+# Use production image
+image:
+  repository: your-registry.com/sentry
+  tag: "1.0.0"
+  pullPolicy: Always
+
+# Enable autoscaling in production
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Production resource limits
+resources:
+  limits:
+    cpu: 1000m
+    memory: 512Mi
+  requests:
+    cpu: 200m
+    memory: 128Mi
+
+# Production security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+    - ALL
+
+# Use existing secrets in production
+secrets:
+  create: false
+  existingSecret: "sentry-production-tokens"
+
+# Production monitoring configuration
+config:
+  monitor:
+    repo_a:
+      type: "github"
+      url: "https://github.com/your-org/production-repo"
+      branch: "main"
+      token: "${GITHUB_TOKEN}"
+    
+    repo_b:
+      type: "gitlab"
+      url: "https://gitlab.your-org.com/production/repo"
+      branch: "main"
+      token: "${GITLAB_TOKEN}"
+    
+    poll:
+      interval: 60  # Less frequent polling in production
+      timeout: 15   # Longer timeout for reliability
+
+  deploy:
+    namespace: "tekton-pipelines"
+    tmp_dir: "/tmp/sentry"
+    cleanup: true
+
+# Production deployment strategy
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# Node affinity for production
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      preference:
+        matchExpressions:
+        - key: node-type
+          operator: In
+          values:
+          - production
+
+# Tolerations for dedicated nodes
+tolerations:
+- key: "production"
+  operator: "Equal"
+  value: "true"
+  effect: "NoSchedule"
+
+# Health check configurations for production
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 60
+  periodSeconds: 120
+  timeoutSeconds: 15
+  failureThreshold: 5
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 30
+  periodSeconds: 60
+  timeoutSeconds: 15
+  failureThreshold: 3
+
+# Disable verbose logging in production
+verbose: false
+
+# Production command arguments
+args:
+  - "-action=watch"
+  - "-config=/etc/sentry/sentry.yaml"

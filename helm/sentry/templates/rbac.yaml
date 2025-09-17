@@ -1,0 +1,42 @@
+{{- if .Values.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "sentry.fullname" . }}-role
+  labels:
+    {{- include "sentry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clusterrole
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list"]
+- apiGroups: ["tekton.dev"]
+  resources: ["pipelines", "pipelineruns", "tasks", "taskruns"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+- apiGroups: ["triggers.tekton.dev"]
+  resources: ["triggerbindings", "triggertemplates", "eventlisteners"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list"]
+  resourceNames: [{{ include "sentry.configMapName" . | quote }}, {{ include "sentry.secretName" . | quote }}]
+{{- with .Values.rbac.additionalRules }}
+{{- toYaml . | nindent 0 }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "sentry.fullname" . }}-rolebinding
+  labels:
+    {{- include "sentry.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clusterrolebinding
+subjects:
+- kind: ServiceAccount
+  name: {{ include "sentry.serviceAccountName" . }}
+  namespace: {{ include "sentry.namespace" . }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "sentry.fullname" . }}-role
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

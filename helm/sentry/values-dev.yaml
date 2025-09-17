@@ -1,0 +1,75 @@
+# Development values for sentry
+# Override default values for development deployment
+
+# Use local development image
+image:
+  repository: localhost:5000/sentry
+  tag: "dev"
+  pullPolicy: Always
+
+# Single replica for development
+replicaCount: 1
+
+# Development resource limits (minimal)
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 50m
+    memory: 32Mi
+
+# Enable verbose logging for development
+verbose: true
+
+# Development secrets (provided inline for convenience)
+secrets:
+  create: true
+  # Base64 encoded development tokens
+  githubToken: "your_github_dev_token_here"
+  gitlabToken: "your_gitlab_dev_token_here"
+
+# Development monitoring configuration
+config:
+  monitor:
+    repo_a:
+      type: "github"
+      url: "https://github.com/your-org/dev-repo"
+      branch: "develop"
+      token: "${GITHUB_TOKEN}"
+    
+    poll:
+      interval: 10  # More frequent polling for development
+      timeout: 5    # Shorter timeout for faster feedback
+
+  deploy:
+    namespace: "tekton-pipelines-dev"
+    tmp_dir: "/tmp/sentry"
+    cleanup: true
+
+# Development health checks (relaxed)
+livenessProbe:
+  enabled: true
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 5
+  failureThreshold: 5
+
+readinessProbe:
+  enabled: true
+  initialDelaySeconds: 5
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# Development namespace
+namespace:
+  create: true
+  name: sentry-dev
+
+# Development-specific environment variables
+env:
+- name: SENTRY_ENV
+  value: "development"
+- name: DEBUG
+  value: "true"
