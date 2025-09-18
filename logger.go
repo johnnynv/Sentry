@@ -110,7 +110,7 @@ func (l *Logger) StructuredLog(level LogLevel, message string, kvPairs ...interf
 	if len(kvPairs) == 0 {
 		structuredMessage = message
 	} else {
-		structuredMessage = fmt.Sprintf("%s", message)
+		structuredMessage = message
 		if len(kvPairs)%2 == 0 {
 			// Properly paired key-value pairs
 			for i := 0; i < len(kvPairs); i += 2 {

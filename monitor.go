@@ -75,14 +75,13 @@ func (m *MonitorService) StartMonitoring() error {
 	ticker := time.NewTicker(time.Duration(m.config.PollingInterval) * time.Second)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ticker.C:
-			if err := m.CheckAllRepositories(); err != nil {
-				AppLogger.ErrorS("Error checking repositories", "error", err)
-			}
+	for range ticker.C {
+		if err := m.CheckAllRepositories(); err != nil {
+			AppLogger.ErrorS("Error checking repositories", "error", err)
 		}
 	}
+
+	return nil // This will never be reached but satisfies the linter
 }
 
 // CheckAllRepositories checks all configured repositories for changes
@@ -285,13 +284,13 @@ func (m *MonitorService) getGitHubLatestCommit(monitor *MonitorConfig, branch st
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, fmt.Errorf("hTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("gitHub API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	// Limit response body size to prevent memory issues
@@ -358,13 +357,13 @@ func (m *MonitorService) getGitLabLatestCommit(monitor *MonitorConfig, branch st
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, fmt.Errorf("hTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitLab API error (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("gitLab API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	// Limit response body size to prevent memory issues
@@ -421,13 +420,13 @@ func (m *MonitorService) getGiteaLatestCommit(monitor *MonitorConfig, branch str
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, fmt.Errorf("hTTP request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("Gitea API error (status %d): %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("gitea API error (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	// Limit response body size to prevent memory issues

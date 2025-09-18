@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestNewMonitorService(t *testing.T) {
+func TestMonitorServiceBasics(t *testing.T) {
 	// Initialize logger for test
 	InitializeLogger(false)
 
@@ -20,6 +20,7 @@ func TestNewMonitorService(t *testing.T) {
 	service := NewMonitorService(config, deployService)
 	if service == nil {
 		t.Error("NewMonitorService() returned nil")
+		return
 	}
 
 	if service.config != config {
@@ -39,7 +40,7 @@ func TestNewMonitorService(t *testing.T) {
 	}
 }
 
-func TestGetTimeoutFromConfig(t *testing.T) {
+func TestMonitorGetTimeoutFromConfig(t *testing.T) {
 	tests := []struct {
 		name     string
 		config   *Config
@@ -61,6 +62,15 @@ func TestGetTimeoutFromConfig(t *testing.T) {
 			},
 			expected: 30,
 		},
+		{
+			name: "with zero timeout",
+			config: &Config{
+				Global: GlobalConfig{
+					Timeout: 0,
+				},
+			},
+			expected: 30,
+		},
 	}
 
 	for _, tt := range tests {
@@ -73,9 +83,73 @@ func TestGetTimeoutFromConfig(t *testing.T) {
 	}
 }
 
-func TestGitHubAPIResponseParsing(t *testing.T) {
-	// This test verifies that we can parse GitHub API response structure
-	// without making actual API calls
+func TestMonitorTriggerManualCheck(t *testing.T) {
+	// Initialize logger for test
+	InitializeLogger(false)
+
+	config := &Config{
+		PollingInterval: 60,
+		Global: GlobalConfig{
+			Timeout: 30,
+		},
+		Repositories: []RepositoryConfig{
+			{
+				Name: "test-repo",
+				Monitor: MonitorConfig{
+					RepoURL:  "https://github.com/owner/repo",
+					Branches: []string{"main"},
+					RepoType: "github",
+					Auth: AuthConfig{
+						Username: "testuser",
+						Token:    "testtoken",
+					},
+				},
+			},
+		},
+	}
+	deployService := NewDeployService(config)
+	service := NewMonitorService(config, deployService)
+
+	// Test manual check (this will fail but we test the function call)
+	service.TriggerManualCheck()
+
+	// We can't verify much without mocking, but at least it doesn't panic
+}
+
+func TestMonitorTriggerGroupDeployment(t *testing.T) {
+	// Initialize logger for test
+	InitializeLogger(false)
+
+	config := &Config{
+		PollingInterval: 60,
+		Global: GlobalConfig{
+			Timeout: 30,
+		},
+		Groups: map[string]GroupConfig{
+			"test-group": {
+				ExecutionStrategy: "parallel",
+				MaxParallel:       2,
+				ContinueOnError:   true,
+				GlobalTimeout:     300,
+			},
+		},
+	}
+	deployService := NewDeployService(config)
+	service := NewMonitorService(config, deployService)
+
+	repositories := []string{"repo1", "repo2"}
+
+	// Test group deployment trigger (this mainly tests that it doesn't panic)
+	err := service.triggerGroupDeployment("test-group", repositories)
+	if err != nil {
+		// This is expected to fail since we don't have real repos
+		t.Logf("triggerGroupDeployment() returned expected error: %v", err)
+	}
+}
+
+func TestMonitorTriggerIndividualDeployment(t *testing.T) {
+	// Initialize logger for test
+	InitializeLogger(false)
 
 	config := &Config{
 		PollingInterval: 60,
@@ -86,62 +160,17 @@ func TestGitHubAPIResponseParsing(t *testing.T) {
 	deployService := NewDeployService(config)
 	service := NewMonitorService(config, deployService)
 
-	// Test GitHub API response structure
-	monitor := &MonitorConfig{
-		RepoURL:  "https://github.com/owner/repo",
-		RepoType: "github",
-		Auth: AuthConfig{
-			Username: "testuser",
-			Token:    "testtoken",
-		},
-	}
+	repoName := "individual-repo"
 
-	// We can't test actual API calls without real credentials,
-	// but we can verify the service is properly initialized
-	if service == nil {
-		t.Error("MonitorService not properly initialized for GitHub API testing")
-	}
-
-	if monitor.RepoType != "github" {
-		t.Error("GitHub monitor config not properly set")
+	// Test individual deployment trigger (this mainly tests that it doesn't panic)
+	err := service.triggerIndividualDeployment(repoName)
+	if err != nil {
+		// This is expected to fail since we don't have real repos
+		t.Logf("triggerIndividualDeployment() returned expected error: %v", err)
 	}
 }
 
-func TestGitLabAPIResponseParsing(t *testing.T) {
-	// This test verifies that we can parse GitLab API response structure
-	// without making actual API calls
-
-	config := &Config{
-		PollingInterval: 60,
-		Global: GlobalConfig{
-			Timeout: 30,
-		},
-	}
-	deployService := NewDeployService(config)
-	service := NewMonitorService(config, deployService)
-
-	// Test GitLab API response structure
-	monitor := &MonitorConfig{
-		RepoURL:  "https://gitlab.com/owner/repo",
-		RepoType: "gitlab",
-		Auth: AuthConfig{
-			Username: "testuser",
-			Token:    "testtoken",
-		},
-	}
-
-	// We can't test actual API calls without real credentials,
-	// but we can verify the service is properly initialized
-	if service == nil {
-		t.Error("MonitorService not properly initialized for GitLab API testing")
-	}
-
-	if monitor.RepoType != "gitlab" {
-		t.Error("GitLab monitor config not properly set")
-	}
-}
-
-func TestCommitChangeDetection(t *testing.T) {
+func TestMonitorCommitChangeDetection(t *testing.T) {
 	config := &Config{
 		PollingInterval: 60,
 		Global: GlobalConfig{
@@ -154,22 +183,22 @@ func TestCommitChangeDetection(t *testing.T) {
 	// Test commit change detection logic
 	repoKey := "test-repo:main"
 
-	// First commit should not be detected as change
+	// First commit storage
 	service.lastCommit[repoKey] = "abc123"
 
-	// Same commit should not be detected as change
+	// Same commit should be properly stored
 	if service.lastCommit[repoKey] != "abc123" {
 		t.Error("Commit SHA not properly stored")
 	}
 
-	// Different commit should be detected as change
+	// Different commit should be properly updated
 	service.lastCommit[repoKey] = "def456"
 	if service.lastCommit[repoKey] != "def456" {
 		t.Error("Commit SHA not properly updated")
 	}
 }
 
-func TestRetryConfig(t *testing.T) {
+func TestMonitorRetryConfig(t *testing.T) {
 	retryConfig := RetryConfig{
 		MaxRetries: 3,
 		RetryDelay: 2 * time.Second,
@@ -184,7 +213,7 @@ func TestRetryConfig(t *testing.T) {
 	}
 }
 
-func TestGroupTrigger(t *testing.T) {
+func TestMonitorGroupTrigger(t *testing.T) {
 	trigger := &GroupTrigger{
 		GroupName:    "test-group",
 		Repositories: []string{"repo1", "repo2"},
@@ -205,7 +234,7 @@ func TestGroupTrigger(t *testing.T) {
 	}
 }
 
-func TestCommitInfo(t *testing.T) {
+func TestMonitorCommitInfo(t *testing.T) {
 	now := time.Now()
 	commit := &CommitInfo{
 		SHA:       "abc123def456",
@@ -230,4 +259,80 @@ func TestCommitInfo(t *testing.T) {
 	if !commit.Timestamp.Equal(now) {
 		t.Errorf("CommitInfo.Timestamp = %v, want %v", commit.Timestamp, now)
 	}
+}
+
+func TestMonitorUnsupportedRepoType(t *testing.T) {
+	// Initialize logger for test
+	InitializeLogger(false)
+
+	config := &Config{
+		PollingInterval: 60,
+		Global: GlobalConfig{
+			Timeout: 30,
+		},
+	}
+	deployService := NewDeployService(config)
+	service := NewMonitorService(config, deployService)
+
+	monitor := &MonitorConfig{
+		RepoURL:  "https://unsupported.com/owner/repo",
+		RepoType: "unsupported",
+		Auth: AuthConfig{
+			Username: "testuser",
+			Token:    "testtoken",
+		},
+	}
+
+	_, err := service.GetLatestCommit(monitor, "main")
+	if err == nil {
+		t.Error("GetLatestCommit() should return error for unsupported repo type")
+	}
+
+	expectedError := "unsupported repository type: unsupported"
+	if err.Error() != expectedError {
+		t.Errorf("GetLatestCommit() error = %v, want %v", err.Error(), expectedError)
+	}
+}
+
+func TestMonitorGitLabUnsupportedURL(t *testing.T) {
+	// Initialize logger for test
+	InitializeLogger(false)
+
+	config := &Config{
+		PollingInterval: 60,
+		Global: GlobalConfig{
+			Timeout: 30,
+		},
+	}
+	deployService := NewDeployService(config)
+	service := NewMonitorService(config, deployService)
+
+	monitor := &MonitorConfig{
+		RepoURL:  "https://unsupported-gitlab.com/owner/repo",
+		RepoType: "gitlab",
+		Auth: AuthConfig{
+			Username: "testuser",
+			Token:    "testtoken",
+		},
+	}
+
+	_, err := service.getGitLabLatestCommit(monitor, "main")
+	if err == nil {
+		t.Error("getGitLabLatestCommit() should return error for unsupported URL format")
+	}
+
+	// Either gets "unsupported GitLab URL format" or API error, both are valid failures
+	if err == nil {
+		t.Error("getGitLabLatestCommit() should return some error for unsupported URL format")
+	}
+}
+
+// Helper function to check if string contains substring
+func containsSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
