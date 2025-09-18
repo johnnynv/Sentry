@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,8 +23,9 @@ type CommitInfo struct {
 type MonitorService struct {
 	config        *Config
 	httpClient    *http.Client
-	lastCommit    map[string]string // repoKey -> last commit SHA
+	lastCommit    map[string]string // repoName -> last commit SHA
 	deployService *DeployService    // Deploy service for triggered deployments
+	mu            sync.RWMutex      // Protects lastCommit map
 }
 
 // RetryConfig defines retry behavior for network requests
@@ -32,21 +34,37 @@ type RetryConfig struct {
 	RetryDelay time.Duration
 }
 
+// GroupTrigger represents a triggered group deployment
+type GroupTrigger struct {
+	GroupName    string
+	Repositories []string
+	TriggerTime  time.Time
+	TriggerRepo  string // Which repo triggered this group
+}
+
 // NewMonitorService creates a new monitor service instance
 func NewMonitorService(config *Config, deployService *DeployService) *MonitorService {
 	return &MonitorService{
 		config: config,
 		httpClient: &http.Client{
-			Timeout: time.Duration(config.Monitor.Poll.Timeout) * time.Second,
+			Timeout: time.Duration(getTimeoutFromConfig(config)) * time.Second,
 		},
 		lastCommit:    make(map[string]string),
 		deployService: deployService,
 	}
 }
 
+// getTimeoutFromConfig gets timeout from global config or uses default
+func getTimeoutFromConfig(config *Config) int {
+	if config.Global.Timeout > 0 {
+		return config.Global.Timeout
+	}
+	return 30 // Default 30 seconds
+}
+
 // StartMonitoring starts the continuous monitoring process
 func (m *MonitorService) StartMonitoring() error {
-	fmt.Println("Starting repository monitoring...")
+	AppLogger.InfoS("Starting repository monitoring", "polling_interval", m.config.PollingInterval)
 
 	// Initial check to get baseline
 	if err := m.CheckAllRepositories(); err != nil {
@@ -54,40 +72,76 @@ func (m *MonitorService) StartMonitoring() error {
 	}
 
 	// Start polling loop
-	ticker := time.NewTicker(time.Duration(m.config.Monitor.Poll.Interval) * time.Second)
+	ticker := time.NewTicker(time.Duration(m.config.PollingInterval) * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
 			if err := m.CheckAllRepositories(); err != nil {
-				fmt.Printf("Error checking repositories: %v\n", err)
+				AppLogger.ErrorS("Error checking repositories", "error", err)
 			}
 		}
 	}
 }
 
-// CheckAllRepositories checks both repository A and B for changes
+// CheckAllRepositories checks all configured repositories for changes
 func (m *MonitorService) CheckAllRepositories() error {
 	var errors []string
+	triggeredGroups := make(map[string]*GroupTrigger)
+	triggeredIndividual := make([]string, 0)
 
-	// Check repository A - if changed, deploy from repository B
-	if changed, err := m.checkRepository(&m.config.Monitor.RepoA, "repo_a"); err != nil {
-		errors = append(errors, fmt.Sprintf("repo_a: %v", err))
-	} else if changed {
-		fmt.Printf("Repository A has new commits, triggering deployment from Repository B...\n")
-		if deployErr := m.triggerDeploymentFromRepoB(); deployErr != nil {
-			errors = append(errors, fmt.Sprintf("repo_a triggered deployment failed: %v", deployErr))
+	// Check all repositories for changes
+	for _, repo := range m.config.Repositories {
+		changed, err := m.checkRepository(&repo)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s: %v", repo.Name, err))
+			continue
+		}
+
+		if changed {
+			AppLogger.InfoS("Repository change detected", "repo", repo.Name, "group", repo.Group)
+
+			if repo.Group != "" {
+				// This repo belongs to a group
+				if _, exists := triggeredGroups[repo.Group]; !exists {
+					triggeredGroups[repo.Group] = &GroupTrigger{
+						GroupName:    repo.Group,
+						Repositories: make([]string, 0),
+						TriggerTime:  time.Now(),
+						TriggerRepo:  repo.Name,
+					}
+				}
+				// Add all repositories in this group to the trigger list
+				for _, r := range m.config.Repositories {
+					if r.Group == repo.Group {
+						triggeredGroups[repo.Group].Repositories = append(triggeredGroups[repo.Group].Repositories, r.Name)
+					}
+				}
+			} else {
+				// Individual repository (no group)
+				triggeredIndividual = append(triggeredIndividual, repo.Name)
+			}
 		}
 	}
 
-	// Check repository B - if changed, also deploy from repository B
-	if changed, err := m.checkRepository(&m.config.Monitor.RepoB, "repo_b"); err != nil {
-		errors = append(errors, fmt.Sprintf("repo_b: %v", err))
-	} else if changed {
-		fmt.Printf("Repository B has new commits, triggering deployment from Repository B...\n")
-		if deployErr := m.triggerDeploymentFromRepoB(); deployErr != nil {
-			errors = append(errors, fmt.Sprintf("repo_b triggered deployment failed: %v", deployErr))
+	// Process group triggers
+	for groupName, trigger := range triggeredGroups {
+		AppLogger.InfoS("Triggering group deployment",
+			"group", groupName,
+			"triggered_by", trigger.TriggerRepo,
+			"repositories", trigger.Repositories)
+
+		if err := m.triggerGroupDeployment(groupName, trigger.Repositories); err != nil {
+			errors = append(errors, fmt.Sprintf("group %s deployment failed: %v", groupName, err))
+		}
+	}
+
+	// Process individual triggers
+	for _, repoName := range triggeredIndividual {
+		AppLogger.InfoS("Triggering individual deployment", "repo", repoName)
+		if err := m.triggerIndividualDeployment(repoName); err != nil {
+			errors = append(errors, fmt.Sprintf("individual %s deployment failed: %v", repoName, err))
 		}
 	}
 
@@ -99,25 +153,62 @@ func (m *MonitorService) CheckAllRepositories() error {
 }
 
 // checkRepository checks a single repository for changes
-func (m *MonitorService) checkRepository(repo *RepoConfig, repoKey string) (bool, error) {
-	commit, err := m.GetLatestCommit(repo)
-	if err != nil {
-		return false, fmt.Errorf("failed to get latest commit: %w", err)
+func (m *MonitorService) checkRepository(repo *RepositoryConfig) (bool, error) {
+	// Check all configured branches
+	for _, branch := range repo.Monitor.Branches {
+		changed, err := m.checkRepositoryBranch(repo, branch)
+		if err != nil {
+			return false, err
+		}
+		if changed {
+			return true, nil // Any branch change triggers deployment
+		}
+	}
+	return false, nil
+}
+
+// checkRepositoryBranch checks a specific branch of a repository
+func (m *MonitorService) checkRepositoryBranch(repo *RepositoryConfig, branch string) (bool, error) {
+	// Create a temporary repo config for this specific branch
+	branchRepo := &MonitorConfig{
+		RepoURL:  repo.Monitor.RepoURL,
+		RepoType: repo.Monitor.RepoType,
+		Auth:     repo.Monitor.Auth,
 	}
 
-	lastSHA, exists := m.lastCommit[repoKey]
+	commit, err := m.GetLatestCommit(branchRepo, branch)
+	if err != nil {
+		return false, fmt.Errorf("failed to get latest commit for branch %s: %w", branch, err)
+	}
+
+	cacheKey := fmt.Sprintf("%s:%s", repo.Name, branch)
+
+	m.mu.Lock()
+	lastSHA, exists := m.lastCommit[cacheKey]
 	if !exists {
-		// First time checking this repository
-		m.lastCommit[repoKey] = commit.SHA
-		fmt.Printf("%s: Initial commit recorded: %s\n", repoKey, commit.SHA[:8])
+		// First time checking this repository/branch
+		m.lastCommit[cacheKey] = commit.SHA
+		m.mu.Unlock()
+		AppLogger.InfoS("Initial commit recorded",
+			"repo", repo.Name,
+			"branch", branch,
+			"sha", commit.SHA[:8])
 		return false, nil
 	}
+	m.mu.Unlock()
 
 	if commit.SHA != lastSHA {
-		fmt.Printf("%s: New commit detected: %s -> %s\n", repoKey, lastSHA[:8], commit.SHA[:8])
-		fmt.Printf("  Author: %s\n", commit.Author)
-		fmt.Printf("  Message: %s\n", commit.Message)
-		m.lastCommit[repoKey] = commit.SHA
+		AppLogger.InfoS("New commit detected",
+			"repo", repo.Name,
+			"branch", branch,
+			"old_sha", lastSHA[:8],
+			"new_sha", commit.SHA[:8],
+			"author", commit.Author,
+			"message", commit.Message)
+
+		m.mu.Lock()
+		m.lastCommit[cacheKey] = commit.SHA
+		m.mu.Unlock()
 		return true, nil
 	}
 
@@ -125,7 +216,7 @@ func (m *MonitorService) checkRepository(repo *RepoConfig, repoKey string) (bool
 }
 
 // GetLatestCommit retrieves the latest commit information from repository with retry
-func (m *MonitorService) GetLatestCommit(repo *RepoConfig) (*CommitInfo, error) {
+func (m *MonitorService) GetLatestCommit(monitor *MonitorConfig, branch string) (*CommitInfo, error) {
 	retryConfig := RetryConfig{
 		MaxRetries: 3,
 		RetryDelay: 2 * time.Second,
@@ -134,20 +225,25 @@ func (m *MonitorService) GetLatestCommit(repo *RepoConfig) (*CommitInfo, error) 
 	var lastErr error
 	for attempt := 0; attempt <= retryConfig.MaxRetries; attempt++ {
 		if attempt > 0 {
-			fmt.Printf("Retrying API call (attempt %d/%d) after error: %v\n", attempt, retryConfig.MaxRetries, lastErr)
+			AppLogger.WarnS("Retrying API call",
+				"attempt", attempt,
+				"max_retries", retryConfig.MaxRetries,
+				"error", lastErr)
 			time.Sleep(retryConfig.RetryDelay)
 		}
 
 		var commit *CommitInfo
 		var err error
 
-		switch repo.Type {
+		switch monitor.RepoType {
 		case "github":
-			commit, err = m.getGitHubLatestCommit(repo)
+			commit, err = m.getGitHubLatestCommit(monitor, branch)
 		case "gitlab":
-			commit, err = m.getGitLabLatestCommit(repo)
+			commit, err = m.getGitLabLatestCommit(monitor, branch)
+		case "gitea":
+			commit, err = m.getGiteaLatestCommit(monitor, branch)
 		default:
-			return nil, fmt.Errorf("unsupported repository type: %s", repo.Type)
+			return nil, fmt.Errorf("unsupported repository type: %s", monitor.RepoType)
 		}
 
 		if err == nil {
@@ -166,18 +262,17 @@ func (m *MonitorService) GetLatestCommit(repo *RepoConfig) (*CommitInfo, error) 
 }
 
 // getGitHubLatestCommit gets latest commit from GitHub API
-func (m *MonitorService) getGitHubLatestCommit(repo *RepoConfig) (*CommitInfo, error) {
+func (m *MonitorService) getGitHubLatestCommit(monitor *MonitorConfig, branch string) (*CommitInfo, error) {
 	// Extract owner and repo from URL
-	// Expected format: https://github.com/owner/repo
-	parts := strings.Split(strings.TrimSuffix(repo.URL, "/"), "/")
+	parts := strings.Split(strings.TrimSuffix(monitor.RepoURL, "/"), "/")
 	if len(parts) < 2 {
-		return nil, fmt.Errorf("invalid GitHub URL format: %s", repo.URL)
+		return nil, fmt.Errorf("invalid GitHub URL format: %s", monitor.RepoURL)
 	}
 	owner := parts[len(parts)-2]
 	repoName := parts[len(parts)-1]
 
 	// GitHub API endpoint for latest commit
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", owner, repoName, repo.Branch)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/commits/%s", owner, repoName, branch)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -185,7 +280,7 @@ func (m *MonitorService) getGitHubLatestCommit(repo *RepoConfig) (*CommitInfo, e
 	}
 
 	// Add authorization header
-	req.Header.Set("Authorization", fmt.Sprintf("token %s", repo.Token))
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", monitor.Auth.Token))
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := m.httpClient.Do(req)
@@ -232,10 +327,8 @@ func (m *MonitorService) getGitHubLatestCommit(repo *RepoConfig) (*CommitInfo, e
 }
 
 // getGitLabLatestCommit gets latest commit from GitLab API
-func (m *MonitorService) getGitLabLatestCommit(repo *RepoConfig) (*CommitInfo, error) {
-	// Extract project path from URL
-	// Expected format: https://gitlab.com/owner/project or https://gitlab-master.nvidia.com/owner/project
-	url := strings.TrimSuffix(repo.URL, "/")
+func (m *MonitorService) getGitLabLatestCommit(monitor *MonitorConfig, branch string) (*CommitInfo, error) {
+	url := strings.TrimSuffix(monitor.RepoURL, "/")
 
 	// Find the base URL and project path
 	var baseURL, projectPath string
@@ -246,14 +339,14 @@ func (m *MonitorService) getGitLabLatestCommit(repo *RepoConfig) (*CommitInfo, e
 		baseURL = "https://gitlab-master.nvidia.com"
 		projectPath = strings.TrimPrefix(url, "https://gitlab-master.nvidia.com/")
 	} else {
-		return nil, fmt.Errorf("unsupported GitLab URL format: %s", repo.URL)
+		return nil, fmt.Errorf("unsupported GitLab URL format: %s", monitor.RepoURL)
 	}
 
 	// URL encode the project path
 	projectPath = strings.ReplaceAll(projectPath, "/", "%2F")
 
 	// GitLab API endpoint for latest commit
-	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/commits/%s", baseURL, projectPath, repo.Branch)
+	apiURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/commits/%s", baseURL, projectPath, branch)
 
 	req, err := http.NewRequest("GET", apiURL, nil)
 	if err != nil {
@@ -261,7 +354,7 @@ func (m *MonitorService) getGitLabLatestCommit(repo *RepoConfig) (*CommitInfo, e
 	}
 
 	// Add authorization header
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", repo.Token))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", monitor.Auth.Token))
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
@@ -302,39 +395,118 @@ func (m *MonitorService) getGitLabLatestCommit(repo *RepoConfig) (*CommitInfo, e
 	}, nil
 }
 
+// getGiteaLatestCommit gets latest commit from Gitea API
+func (m *MonitorService) getGiteaLatestCommit(monitor *MonitorConfig, branch string) (*CommitInfo, error) {
+	// Extract base URL, owner and repo from URL
+	url := strings.TrimSuffix(monitor.RepoURL, "/")
+	parts := strings.Split(url, "/")
+	if len(parts) < 5 {
+		return nil, fmt.Errorf("invalid Gitea URL format: %s", monitor.RepoURL)
+	}
+
+	baseURL := strings.Join(parts[:3], "/") // https://gitea.example.com
+	owner := parts[len(parts)-2]
+	repoName := parts[len(parts)-1]
+
+	// Gitea API endpoint for latest commit
+	apiURL := fmt.Sprintf("%s/api/v1/repos/%s/%s/commits/%s", baseURL, owner, repoName, branch)
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add authorization header
+	req.Header.Set("Authorization", fmt.Sprintf("token %s", monitor.Auth.Token))
+
+	resp, err := m.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("Gitea API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Limit response body size to prevent memory issues
+	limitedReader := io.LimitReader(resp.Body, 1024*1024) // 1MB limit
+	body, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var giteaCommit struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Message string `json:"message"`
+			Author  struct {
+				Name string    `json:"name"`
+				Date time.Time `json:"date"`
+			} `json:"author"`
+		} `json:"commit"`
+		HTMLURL string `json:"html_url"`
+	}
+
+	if err := json.Unmarshal(body, &giteaCommit); err != nil {
+		return nil, fmt.Errorf("failed to parse Gitea response: %w", err)
+	}
+
+	return &CommitInfo{
+		SHA:       giteaCommit.SHA,
+		Message:   giteaCommit.Commit.Message,
+		Author:    giteaCommit.Commit.Author.Name,
+		Timestamp: giteaCommit.Commit.Author.Date,
+		URL:       giteaCommit.HTMLURL,
+	}, nil
+}
+
 // TriggerManualCheck performs a manual check of all repositories
 func (m *MonitorService) TriggerManualCheck() error {
-	fmt.Println("Performing manual repository check...")
+	AppLogger.Info("Performing manual repository check")
 	return m.CheckAllRepositories()
 }
 
-// triggerDeploymentFromRepoB triggers deployment from repository B
-func (m *MonitorService) triggerDeploymentFromRepoB() error {
+// triggerGroupDeployment triggers deployment for a group of repositories
+func (m *MonitorService) triggerGroupDeployment(groupName string, repositories []string) error {
 	if m.deployService == nil {
 		return fmt.Errorf("deploy service not initialized")
 	}
 
-	fmt.Printf("Deploying Tekton configurations from Repository B (%s)...\n", m.config.Monitor.RepoB.URL)
-
-	// Clone repository B and deploy its .tekton configurations
-	result, err := m.deployService.DeployFromRepository(&m.config.Monitor.RepoB, "repo_b")
-	if err != nil {
-		AppLogger.LogDeploymentFailure("repo_b", err)
-		return fmt.Errorf("deployment from repository B failed: %w", err)
+	groupConfig, exists := m.config.Groups[groupName]
+	if !exists {
+		return fmt.Errorf("group configuration not found: %s", groupName)
 	}
 
-	if !result.Success {
-		AppLogger.LogDeploymentFailure("repo_b", fmt.Errorf(result.Error))
-		return fmt.Errorf("deployment from repository B unsuccessful: %s", result.Error)
+	AppLogger.InfoS("Starting group deployment",
+		"group", groupName,
+		"strategy", groupConfig.ExecutionStrategy,
+		"repositories", repositories)
+
+	return m.deployService.DeployGroup(groupName, repositories, &groupConfig)
+}
+
+// triggerIndividualDeployment triggers deployment for an individual repository
+func (m *MonitorService) triggerIndividualDeployment(repoName string) error {
+	if m.deployService == nil {
+		return fmt.Errorf("deploy service not initialized")
 	}
 
-	AppLogger.LogDeploymentSuccess("repo_b", len(result.FilesDeployed))
-	fmt.Printf("Successfully deployed %d Tekton files from Repository B\n", len(result.FilesDeployed))
-
-	// Log deployment details
-	for _, file := range result.FilesDeployed {
-		fmt.Printf("  - Deployed: %s\n", file)
+	// Find the repository config
+	var repoConfig *RepositoryConfig
+	for _, repo := range m.config.Repositories {
+		if repo.Name == repoName {
+			repoConfig = &repo
+			break
+		}
 	}
 
-	return nil
+	if repoConfig == nil {
+		return fmt.Errorf("repository configuration not found: %s", repoName)
+	}
+
+	AppLogger.InfoS("Starting individual deployment", "repo", repoName)
+
+	return m.deployService.DeployIndividual(repoConfig)
 }

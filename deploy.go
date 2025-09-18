@@ -1,12 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,11 +18,21 @@ type DeployService struct {
 
 // DeployResult represents the result of a deployment operation
 type DeployResult struct {
-	RepoKey       string   `json:"repo_key"`
-	ClonePath     string   `json:"clone_path"`
-	FilesDeployed []string `json:"files_deployed"`
-	Success       bool     `json:"success"`
-	Error         string   `json:"error,omitempty"`
+	RepoName    string   `json:"repo_name"`
+	ClonePath   string   `json:"clone_path"`
+	CommandsRun []string `json:"commands_run"`
+	Success     bool     `json:"success"`
+	Error       string   `json:"error,omitempty"`
+	Duration    string   `json:"duration"`
+}
+
+// GroupDeployResult represents the result of a group deployment
+type GroupDeployResult struct {
+	GroupName string                   `json:"group_name"`
+	Results   map[string]*DeployResult `json:"results"`
+	Success   bool                     `json:"success"`
+	TotalTime string                   `json:"total_time"`
+	Strategy  string                   `json:"strategy"`
 }
 
 // NewDeployService creates a new deploy service instance
@@ -31,75 +42,235 @@ func NewDeployService(config *Config) *DeployService {
 	}
 }
 
-// DeployFromRepository clones repository and deploys Tekton configurations
-func (d *DeployService) DeployFromRepository(repo *RepoConfig, repoKey string) (*DeployResult, error) {
-	result := &DeployResult{
-		RepoKey:       repoKey,
-		FilesDeployed: []string{},
-		Success:       false,
+// DeployGroup deploys a group of repositories with specified strategy
+func (d *DeployService) DeployGroup(groupName string, repoNames []string, groupConfig *GroupConfig) error {
+	startTime := time.Now()
+
+	AppLogger.InfoS("Starting group deployment",
+		"group", groupName,
+		"strategy", groupConfig.ExecutionStrategy,
+		"repositories", repoNames,
+		"max_parallel", groupConfig.MaxParallel)
+
+	groupResult := &GroupDeployResult{
+		GroupName: groupName,
+		Results:   make(map[string]*DeployResult),
+		Strategy:  groupConfig.ExecutionStrategy,
 	}
 
+	var err error
+	if groupConfig.ExecutionStrategy == "parallel" {
+		err = d.deployGroupParallel(repoNames, groupConfig, groupResult)
+	} else {
+		err = d.deployGroupSequential(repoNames, groupConfig, groupResult)
+	}
+
+	groupResult.TotalTime = time.Since(startTime).String()
+	groupResult.Success = err == nil
+
+	// Log overall result
+	if groupResult.Success {
+		AppLogger.LogGroupDeploymentSuccess(groupName, len(repoNames), groupResult.TotalTime)
+	} else {
+		AppLogger.LogGroupDeploymentFailure(groupName, err)
+	}
+
+	return err
+}
+
+// deployGroupParallel deploys repositories in parallel
+func (d *DeployService) deployGroupParallel(repoNames []string, groupConfig *GroupConfig, result *GroupDeployResult) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(groupConfig.GlobalTimeout)*time.Second)
+	defer cancel()
+
+	// Create semaphore to limit concurrent deployments
+	semaphore := make(chan struct{}, groupConfig.MaxParallel)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstError error
+
+	for _, repoName := range repoNames {
+		wg.Add(1)
+		go func(rn string) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			select {
+			case semaphore <- struct{}{}:
+				defer func() { <-semaphore }()
+			case <-ctx.Done():
+				mu.Lock()
+				if firstError == nil {
+					firstError = fmt.Errorf("deployment timeout reached")
+				}
+				result.Results[rn] = &DeployResult{
+					RepoName: rn,
+					Success:  false,
+					Error:    "timeout",
+				}
+				mu.Unlock()
+				return
+			}
+
+			// Deploy the repository
+			repoResult := d.deployRepository(rn, ctx)
+
+			mu.Lock()
+			result.Results[rn] = repoResult
+			if !repoResult.Success && firstError == nil && !groupConfig.ContinueOnError {
+				firstError = fmt.Errorf("deployment failed for %s: %s", rn, repoResult.Error)
+			}
+			mu.Unlock()
+		}(repoName)
+	}
+
+	wg.Wait()
+
+	// Check if we should fail fast
+	if !groupConfig.ContinueOnError && firstError != nil {
+		return firstError
+	}
+
+	// Check if any deployments failed
+	var failures []string
+	for repoName, res := range result.Results {
+		if !res.Success {
+			failures = append(failures, fmt.Sprintf("%s: %s", repoName, res.Error))
+		}
+	}
+
+	if len(failures) > 0 {
+		return fmt.Errorf("deployment failures: %s", strings.Join(failures, "; "))
+	}
+
+	return nil
+}
+
+// deployGroupSequential deploys repositories sequentially
+func (d *DeployService) deployGroupSequential(repoNames []string, groupConfig *GroupConfig, result *GroupDeployResult) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(groupConfig.GlobalTimeout)*time.Second)
+	defer cancel()
+
+	for _, repoName := range repoNames {
+		repoResult := d.deployRepository(repoName, ctx)
+		result.Results[repoName] = repoResult
+
+		if !repoResult.Success {
+			if !groupConfig.ContinueOnError {
+				return fmt.Errorf("deployment failed for %s: %s", repoName, repoResult.Error)
+			}
+			AppLogger.WarnS("Repository deployment failed but continuing",
+				"repo", repoName,
+				"error", repoResult.Error)
+		}
+
+		// Check for context timeout
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("deployment timeout reached")
+		default:
+		}
+	}
+
+	return nil
+}
+
+// DeployIndividual deploys a single repository
+func (d *DeployService) DeployIndividual(repoConfig *RepositoryConfig) error {
+	ctx := context.Background()
+	result := d.deployRepository(repoConfig.Name, ctx)
+
+	if result.Success {
+		AppLogger.LogDeploymentSuccess(repoConfig.Name, len(result.CommandsRun))
+		return nil
+	} else {
+		AppLogger.LogDeploymentFailure(repoConfig.Name, fmt.Errorf(result.Error))
+		return fmt.Errorf("deployment failed: %s", result.Error)
+	}
+}
+
+// deployRepository performs the actual deployment for a single repository
+func (d *DeployService) deployRepository(repoName string, ctx context.Context) *DeployResult {
+	startTime := time.Now()
+	result := &DeployResult{
+		RepoName:    repoName,
+		CommandsRun: []string{},
+		Success:     false,
+	}
+
+	// Find repository configuration
+	var repoConfig *RepositoryConfig
+	for _, repo := range d.config.Repositories {
+		if repo.Name == repoName {
+			repoConfig = &repo
+			break
+		}
+	}
+
+	if repoConfig == nil {
+		result.Error = fmt.Sprintf("repository configuration not found: %s", repoName)
+		result.Duration = time.Since(startTime).String()
+		return result
+	}
+
+	AppLogger.InfoS("Starting repository deployment",
+		"repo", repoName,
+		"qa_repo", repoConfig.Deploy.QARepoURL,
+		"project", repoConfig.Deploy.ProjectName)
+
 	// Create temporary directory for cloning
-	tmpDir, err := d.createTempDirectory(repoKey)
+	tmpDir, err := d.createTempDirectory(repoName)
 	if err != nil {
 		result.Error = fmt.Sprintf("failed to create temp directory: %v", err)
-		return result, err
+		result.Duration = time.Since(startTime).String()
+		return result
 	}
 	result.ClonePath = tmpDir
 
-	// Ensure cleanup happens regardless of success/failure
+	// Ensure cleanup happens
 	defer func() {
-		if d.config.Deploy.Cleanup {
+		if d.shouldCleanup() {
 			if cleanupErr := d.cleanupTempDirectory(tmpDir); cleanupErr != nil {
-				fmt.Printf("Warning: failed to cleanup temp directory %s: %v\n", tmpDir, cleanupErr)
+				AppLogger.WarnS("Failed to cleanup temp directory",
+					"path", tmpDir,
+					"error", cleanupErr)
 			}
 		}
 	}()
 
-	// Clone repository with retry mechanism
-	if err := d.cloneRepositoryWithRetry(repo, tmpDir); err != nil {
-		result.Error = fmt.Sprintf("failed to clone repository: %v", err)
-		return result, err
+	// Clone QA repository
+	if err := d.cloneQARepository(repoConfig, tmpDir, ctx); err != nil {
+		result.Error = fmt.Sprintf("failed to clone QA repository: %v", err)
+		result.Duration = time.Since(startTime).String()
+		return result
 	}
 
-	// Scan for .tekton directories and YAML files
-	tektonFiles, err := d.scanTektonFiles(tmpDir)
-	if err != nil {
-		result.Error = fmt.Sprintf("failed to scan Tekton files: %v", err)
-		return result, err
-	}
-
-	if len(tektonFiles) == 0 {
-		result.Error = "no Tekton configuration files found"
-		return result, fmt.Errorf("no Tekton configuration files found in repository")
-	}
-
-	// Deploy each Tekton file with rollback on failure
-	deployedFiles := []string{}
-	for _, filePath := range tektonFiles {
-		if err := d.deployTektonFileWithRetry(filePath); err != nil {
-			// Rollback previously deployed files
-			d.rollbackDeployedFiles(deployedFiles)
-			result.Error = fmt.Sprintf("failed to deploy %s: %v", filePath, err)
-			return result, err
-		}
-		deployedFiles = append(deployedFiles, filePath)
-		result.FilesDeployed = append(result.FilesDeployed, filePath)
+	// Execute deployment commands
+	if err := d.executeDeploymentCommands(repoConfig, tmpDir, result, ctx); err != nil {
+		result.Error = fmt.Sprintf("failed to execute commands: %v", err)
+		result.Duration = time.Since(startTime).String()
+		return result
 	}
 
 	result.Success = true
-	fmt.Printf("Successfully deployed %d Tekton files from %s\n", len(result.FilesDeployed), repoKey)
-	return result, nil
+	result.Duration = time.Since(startTime).String()
+
+	AppLogger.InfoS("Repository deployment completed",
+		"repo", repoName,
+		"duration", result.Duration,
+		"commands_executed", len(result.CommandsRun))
+
+	return result
 }
 
 // createTempDirectory creates a temporary directory for repository cloning
-func (d *DeployService) createTempDirectory(repoKey string) (string, error) {
-	baseDir := d.config.Deploy.TmpDir
+func (d *DeployService) createTempDirectory(repoName string) (string, error) {
+	baseDir := d.getTempDir()
 	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create base temp directory: %w", err)
 	}
 
-	tmpDir := filepath.Join(baseDir, fmt.Sprintf("sentry-%s", repoKey))
+	tmpDir := filepath.Join(baseDir, fmt.Sprintf("sentry-%s-%d", repoName, time.Now().Unix()))
 
 	// Remove existing directory if it exists
 	if _, err := os.Stat(tmpDir); err == nil {
@@ -115,257 +286,114 @@ func (d *DeployService) createTempDirectory(repoKey string) (string, error) {
 	return tmpDir, nil
 }
 
-// cloneRepository clones the Git repository to specified directory
-func (d *DeployService) cloneRepository(repo *RepoConfig, destDir string) error {
-	// Prepare Git clone command
-	var cmd *exec.Cmd
+// cloneQARepository clones the QA repository
+func (d *DeployService) cloneQARepository(repoConfig *RepositoryConfig, destDir string, ctx context.Context) error {
+	AppLogger.InfoS("Cloning QA repository",
+		"repo", repoConfig.Deploy.QARepoURL,
+		"branch", repoConfig.Deploy.QARepoBranch,
+		"dest", destDir)
 
-	if repo.Type == "github" {
+	var cmd *exec.Cmd
+	auth := repoConfig.Deploy.Auth
+
+	switch repoConfig.Deploy.RepoType {
+	case "github":
 		// For GitHub, use HTTPS with token authentication
-		authURL := strings.Replace(repo.URL, "https://", fmt.Sprintf("https://%s@", repo.Token), 1)
-		cmd = exec.Command("git", "clone", "--branch", repo.Branch, "--depth", "1", authURL, destDir)
-	} else if repo.Type == "gitlab" {
+		cloneURL := strings.Replace(repoConfig.Deploy.QARepoURL, "https://", fmt.Sprintf("https://%s:%s@", auth.Username, auth.Token), 1)
+		cmd = exec.CommandContext(ctx, "git", "clone", "--branch", repoConfig.Deploy.QARepoBranch, "--single-branch", cloneURL, destDir)
+
+	case "gitlab":
 		// For GitLab, use HTTPS with token authentication
-		authURL := strings.Replace(repo.URL, "https://", fmt.Sprintf("https://oauth2:%s@", repo.Token), 1)
-		cmd = exec.Command("git", "clone", "--branch", repo.Branch, "--depth", "1", authURL, destDir)
-	} else {
-		return fmt.Errorf("unsupported repository type: %s", repo.Type)
+		cloneURL := strings.Replace(repoConfig.Deploy.QARepoURL, "https://", fmt.Sprintf("https://%s:%s@", auth.Username, auth.Token), 1)
+		cmd = exec.CommandContext(ctx, "git", "clone", "--branch", repoConfig.Deploy.QARepoBranch, "--single-branch", cloneURL, destDir)
+
+	case "gitea":
+		// For Gitea, use HTTPS with token authentication
+		cloneURL := strings.Replace(repoConfig.Deploy.QARepoURL, "https://", fmt.Sprintf("https://%s:%s@", auth.Username, auth.Token), 1)
+		cmd = exec.CommandContext(ctx, "git", "clone", "--branch", repoConfig.Deploy.QARepoBranch, "--single-branch", cloneURL, destDir)
+
+	default:
+		return fmt.Errorf("unsupported repository type: %s", repoConfig.Deploy.RepoType)
 	}
 
-	// Set environment to avoid interactive prompts
+	// Set environment variables to avoid interactive prompts
 	cmd.Env = append(os.Environ(),
 		"GIT_TERMINAL_PROMPT=0",
-		"GIT_ASKPASS=echo",
-	)
+		"GIT_ASKPASS=true")
 
-	// Execute clone command
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git clone failed: %w\nOutput: %s", err, string(output))
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git clone failed: %w, output: %s", err, string(output))
 	}
 
-	fmt.Printf("Successfully cloned repository to %s\n", destDir)
+	AppLogger.InfoS("QA repository cloned successfully", "repo", repoConfig.Name)
 	return nil
 }
 
-// scanTektonFiles recursively scans for .tekton directories and YAML files
-func (d *DeployService) scanTektonFiles(rootDir string) ([]string, error) {
-	var tektonFiles []string
+// executeDeploymentCommands executes the configured deployment commands
+func (d *DeployService) executeDeploymentCommands(repoConfig *RepositoryConfig, workDir string, result *DeployResult, ctx context.Context) error {
+	AppLogger.InfoS("Executing deployment commands",
+		"repo", repoConfig.Name,
+		"commands", repoConfig.Deploy.Commands)
 
-	err := filepath.WalkDir(rootDir, func(path string, info fs.DirEntry, err error) error {
+	for i, cmdStr := range repoConfig.Deploy.Commands {
+		AppLogger.InfoS("Executing command",
+			"repo", repoConfig.Name,
+			"step", i+1,
+			"command", cmdStr)
+
+		// Execute command with timeout
+		cmdCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		cmd := exec.CommandContext(cmdCtx, "/bin/sh", "-c", cmdStr)
+		cmd.Dir = workDir
+
+		// Set environment variables
+		cmd.Env = append(os.Environ(),
+			fmt.Sprintf("SENTRY_REPO=%s", repoConfig.Name),
+			fmt.Sprintf("SENTRY_PROJECT=%s", repoConfig.Deploy.ProjectName))
+
+		output, err := cmd.CombinedOutput()
+		cancel()
+
+		result.CommandsRun = append(result.CommandsRun, cmdStr)
+
 		if err != nil {
-			return err
+			AppLogger.ErrorS("Command execution failed",
+				"repo", repoConfig.Name,
+				"step", i+1,
+				"command", cmdStr,
+				"error", err,
+				"output", string(output))
+			return fmt.Errorf("command failed (step %d): %s, error: %w, output: %s", i+1, cmdStr, err, string(output))
 		}
 
-		// Check if this is a .tekton directory
-		if info.IsDir() && info.Name() == ".tekton" {
-			// Scan YAML files in .tekton directory
-			yamlFiles, scanErr := d.scanYAMLFiles(path)
-			if scanErr != nil {
-				return fmt.Errorf("failed to scan YAML files in %s: %w", path, scanErr)
-			}
-			tektonFiles = append(tektonFiles, yamlFiles...)
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return nil, fmt.Errorf("failed to walk directory tree: %w", err)
+		AppLogger.InfoS("Command executed successfully",
+			"repo", repoConfig.Name,
+			"step", i+1,
+			"output_size", len(output))
 	}
 
-	return tektonFiles, nil
-}
-
-// scanYAMLFiles scans for YAML files in specified directory
-func (d *DeployService) scanYAMLFiles(dir string) ([]string, error) {
-	var yamlFiles []string
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read directory: %w", err)
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-
-		fileName := entry.Name()
-		ext := strings.ToLower(filepath.Ext(fileName))
-
-		// Check for YAML file extensions
-		if ext == ".yaml" || ext == ".yml" {
-			fullPath := filepath.Join(dir, fileName)
-
-			// Validate that this is a Tekton resource
-			if d.isTektonResource(fullPath) {
-				yamlFiles = append(yamlFiles, fullPath)
-			}
-		}
-	}
-
-	return yamlFiles, nil
-}
-
-// isTektonResource checks if a YAML file contains Tekton resources
-func (d *DeployService) isTektonResource(filePath string) bool {
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		fmt.Printf("Warning: failed to read file %s: %v\n", filePath, err)
-		return false
-	}
-
-	contentStr := string(content)
-
-	// Check for Tekton API versions and kinds
-	tektonIndicators := []string{
-		"apiVersion: tekton.dev/",
-		"kind: Pipeline",
-		"kind: PipelineRun",
-		"kind: Task",
-		"kind: TaskRun",
-		"kind: TriggerBinding",
-		"kind: TriggerTemplate",
-		"kind: EventListener",
-	}
-
-	for _, indicator := range tektonIndicators {
-		if strings.Contains(contentStr, indicator) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// deployTektonFile deploys a single Tekton YAML file using kubectl
-func (d *DeployService) deployTektonFile(filePath string) error {
-	// Prepare kubectl apply command
-	cmd := exec.Command("kubectl", "apply", "-f", filePath, "-n", d.config.Deploy.Namespace)
-
-	// Execute deployment command
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl apply failed for %s: %w\nOutput: %s", filePath, err, string(output))
-	}
-
-	fmt.Printf("Successfully deployed: %s\n", filePath)
-	fmt.Printf("kubectl output: %s\n", string(output))
 	return nil
 }
 
 // cleanupTempDirectory removes the temporary directory
 func (d *DeployService) cleanupTempDirectory(tmpDir string) error {
-	if err := os.RemoveAll(tmpDir); err != nil {
-		return fmt.Errorf("failed to remove temp directory %s: %w", tmpDir, err)
+	if tmpDir == "" || tmpDir == "/" {
+		return fmt.Errorf("invalid temp directory path: %s", tmpDir)
 	}
 
-	fmt.Printf("Cleaned up temporary directory: %s\n", tmpDir)
-	return nil
+	AppLogger.InfoS("Cleaning up temporary directory", "path", tmpDir)
+	return os.RemoveAll(tmpDir)
 }
 
-// ValidateDeploymentEnvironment checks if deployment environment is ready
-func (d *DeployService) ValidateDeploymentEnvironment() error {
-	// Check if kubectl is available
-	if _, err := exec.LookPath("kubectl"); err != nil {
-		return fmt.Errorf("kubectl command not found in PATH: %w", err)
+// getTempDir returns the configured temp directory or default
+func (d *DeployService) getTempDir() string {
+	if d.config.Global.TmpDir != "" {
+		return d.config.Global.TmpDir
 	}
-
-	// Check if git is available
-	if _, err := exec.LookPath("git"); err != nil {
-		return fmt.Errorf("git command not found in PATH: %w", err)
-	}
-
-	// Check kubectl connectivity
-	cmd := exec.Command("kubectl", "cluster-info")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("kubectl cluster connectivity check failed: %w", err)
-	}
-
-	// Check if target namespace exists
-	cmd = exec.Command("kubectl", "get", "namespace", d.config.Deploy.Namespace)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("target namespace '%s' does not exist or is not accessible: %w", d.config.Deploy.Namespace, err)
-	}
-
-	fmt.Println("Deployment environment validation passed")
-	return nil
+	return "/tmp/sentry"
 }
 
-// cloneRepositoryWithRetry clones repository with retry mechanism
-func (d *DeployService) cloneRepositoryWithRetry(repo *RepoConfig, destDir string) error {
-	maxRetries := 3
-	retryDelay := 2 * time.Second
-
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			fmt.Printf("Retrying git clone (attempt %d/%d) after error: %v\n", attempt, maxRetries, lastErr)
-			time.Sleep(retryDelay)
-		}
-
-		err := d.cloneRepository(repo, destDir)
-		if err == nil {
-			return nil
-		}
-
-		lastErr = err
-	}
-
-	return fmt.Errorf("failed to clone after %d retries: %w", maxRetries, lastErr)
-}
-
-// deployTektonFileWithRetry deploys Tekton file with retry mechanism
-func (d *DeployService) deployTektonFileWithRetry(filePath string) error {
-	maxRetries := 2
-	retryDelay := 1 * time.Second
-
-	var lastErr error
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			fmt.Printf("Retrying kubectl apply (attempt %d/%d) for %s after error: %v\n", attempt, maxRetries, filePath, lastErr)
-			time.Sleep(retryDelay)
-		}
-
-		err := d.deployTektonFile(filePath)
-		if err == nil {
-			return nil
-		}
-
-		lastErr = err
-	}
-
-	return fmt.Errorf("failed to deploy %s after %d retries: %w", filePath, maxRetries, lastErr)
-}
-
-// rollbackDeployedFiles attempts to delete previously deployed resources
-func (d *DeployService) rollbackDeployedFiles(deployedFiles []string) {
-	if len(deployedFiles) == 0 {
-		return
-	}
-
-	fmt.Printf("Rolling back %d deployed files due to deployment failure...\n", len(deployedFiles))
-
-	for _, filePath := range deployedFiles {
-		if err := d.deleteTektonFile(filePath); err != nil {
-			fmt.Printf("Warning: failed to rollback %s: %v\n", filePath, err)
-		} else {
-			fmt.Printf("Successfully rolled back: %s\n", filePath)
-		}
-	}
-}
-
-// deleteTektonFile removes a deployed Tekton resource using kubectl delete
-func (d *DeployService) deleteTektonFile(filePath string) error {
-	// Prepare kubectl delete command
-	cmd := exec.Command("kubectl", "delete", "-f", filePath, "-n", d.config.Deploy.Namespace, "--ignore-not-found=true")
-
-	// Execute delete command
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("kubectl delete failed for %s: %w\nOutput: %s", filePath, err, string(output))
-	}
-
-	return nil
+// shouldCleanup returns whether to cleanup temp directories
+func (d *DeployService) shouldCleanup() bool {
+	return d.config.Global.Cleanup
 }

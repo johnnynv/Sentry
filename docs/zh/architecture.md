@@ -1,257 +1,390 @@
-# Sentry 简化架构设计
+# Sentry 系统架构设计
 
 ## 1. 核心需求
 
-- 监控 repo A 的指定分支变化
-- 变化时克隆 repo B，找到 .tekton 目录的 yaml 文件
-- 执行 kubectl apply 部署
-- 支持手动触发
-- 支持 GitHub 和 GitLab
-- Go 语言实现，YAML 配置
+- **多仓库监控**：监控多个Git仓库的指定分支变化
+- **组级部署**：支持并行和串行的批量部署策略
+- **灵活命令**：支持自定义部署命令，而非仅限于YAML文件扫描
+- **多平台支持**：支持GitHub、GitLab、Gitea等Git平台
+- **安全可靠**：完整的RBAC权限控制和错误恢复机制
+- **云原生设计**：为Kubernetes和Tekton Pipelines优化
 
-## 2. 简化架构
-
-```
-┌─────────────────────────────────────────┐
-│              Sentry CLI                 │
-├─────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────────┐   │
-│  │   Monitor   │  │    Deployer     │   │
-│  │   Service   │  │    Service      │   │
-│  └─────────────┘  └─────────────────┘   │
-├─────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────────┐   │
-│  │ Git Client  │  │ kubectl Exec    │   │
-│  └─────────────┘  └─────────────────┘   │
-└─────────────────────────────────────────┘
-                    │
-                    ▼
-┌─────────────────────────────────────────┐
-│     External Dependencies              │
-├─────────────────────────────────────────┤
-│  Repo A (GitHub/GitLab)                │
-│  Repo B (GitHub/GitLab)                │
-│  Kubernetes + Tekton                    │
-└─────────────────────────────────────────┘
-```
-
-## 3. 核心组件
-
-### 3.1 Monitor Service (监控服务)
-- **职责**：定时检查 repo A 的分支变化
-- **实现**：简单的定时器 + Git API 调用
-
-### 3.2 Deployer Service (部署服务) 
-- **职责**：克隆 repo B，扫描 .tekton 目录，执行 kubectl
-- **实现**：git clone + 文件扫描 + shell 调用
-
-### 3.3 Git Client (Git客户端)
-- **职责**：与 GitHub/GitLab API 交互
-- **实现**：HTTP 客户端调用 REST API
-
-### 3.4 kubectl Executor (kubectl执行器)
-- **职责**：执行 kubectl apply 命令
-- **实现**：简单的 shell 命令执行
-
-## 4. 数据流
+## 2. 系统架构概览
 
 ```
-配置加载 → 启动监控 → 检测变化 → 触发部署 → 完成
-    ↓          ↓         ↓         ↓        ↓
-  YAML      定时器    Git API   Git Clone  kubectl
+┌─────────────────────────────────────────────────────────────────┐
+│                          Sentry 系统                            │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
+│  │   配置管理器     │  │    监控服务     │  │    部署服务     │  │
+│  │  (ConfigMgr)   │  │ (MonitorSvc)   │  │  (DeploySvc)   │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
+│           │                     │                     │          │
+├───────────┼─────────────────────┼─────────────────────┼──────────┤
+│           ▼                     ▼                     ▼          │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
+│  │   YAML配置      │  │   Git API      │  │  命令执行器     │  │
+│  │     解析        │  │    客户端       │  │    & kubectl    │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+              ┌─────────────────────────────────────┐
+              │          外部系统集成                │
+              ├─────────────────────────────────────┤
+              │  GitHub API │ GitLab API │ Gitea API │
+              │      │            │           │      │
+              │      ▼            ▼           ▼      │
+              │ ┌─────────┐ ┌─────────┐ ┌─────────┐ │
+              │ │ Repo A1 │ │ Repo A2 │ │ Repo B  │ │
+              │ │监控仓库 │ │监控仓库 │ │QA仓库   │ │
+              │ └─────────┘ └─────────┘ └─────────┘ │
+              └─────────────────────────────────────┘
+                               │
+                               ▼
+              ┌─────────────────────────────────────┐
+              │       Kubernetes集群                │
+              ├─────────────────────────────────────┤
+              │  Tekton Pipeline │ 其他Workloads    │
+              └─────────────────────────────────────┘
 ```
 
-1. **监控循环**：每N秒检查一次 repo A 的最新 commit
-2. **变化检测**：对比上次记录的 commit SHA
-3. **触发部署**：变化时克隆 repo B，扫描 .tekton，执行 kubectl
+## 3. 核心组件设计
 
-## 5. 配置设计
+### 3.1 配置管理器 (Config Manager)
 
+**职责**：
+- 加载和解析YAML配置文件
+- 环境变量展开和验证
+- 支持全局组配置和多仓库配置
+- 配置热重载（未来功能）
+
+**关键特性**：
+- 方案C设计：全局组配置 + 简化repository配置
+- 支持组级执行策略（并行/串行）
+- Kubernetes命名规范验证
+- 敏感信息环境变量管理
+
+**配置结构**：
 ```yaml
-# sentry.yaml
-target_repo:
-  url: "https://github.com/example/repo-a"
-  branches: "main,develop"
-  type: "github"
+# 全局组配置
+groups:
+  ai-projects:
+    execution_strategy: "parallel"  # parallel | sequential
+    max_parallel: 3
+    continue_on_error: true
+    global_timeout: 900
 
-qa_repo:
-  url: "https://gitlab-master.nvidia.com/example/repo-b"  
-  branch: "main"
-  type: "gitlab"
-
-auth:
-  github_token: "${GITHUB_TOKEN}"
-  gitlab_token: "${GITLAB_TOKEN}"
-
-polling_interval: 300  # 秒，最小60秒
-tekton_dir: ".tekton"  # Tekton配置目录
-kubectl_context: "default"  # kubectl上下文
-namespace: "tekton-pipelines"  # 部署命名空间
-
-# 可选配置
-log_level: "info"  # debug, info, warn, error
-max_retries: 3     # 失败重试次数
-timeout: 300       # 超时时间（秒）
+# 仓库配置
+repositories:
+  - name: "rag-project"
+    group: "ai-projects"  # 可选分组
+    monitor: { ... }      # 监控配置
+    deploy: { ... }       # 部署配置
 ```
 
-## 6. 目录结构
+### 3.2 监控服务 (Monitor Service)
+
+**职责**：
+- 定时轮询多个Git仓库
+- 检测commit变化并记录状态
+- 支持多分支监控和正则匹配
+- 触发组级别或独立的部署任务
+
+**关键特性**：
+- 并发监控多个仓库
+- 智能变化检测（SHA比较）
+- 分支模式匹配支持
+- 重试机制和错误恢复
+- 组级触发策略
+
+**工作流程**：
+```
+定时器触发 → 并发检查所有仓库 → 检测变化 → 分组触发部署
+     ↓              ↓               ↓           ↓
+   60s轮询      Git API调用      SHA比较    组策略执行
+```
+
+### 3.3 部署服务 (Deploy Service)
+
+**职责**：
+- 执行组级别的批量部署
+- 克隆QA仓库并执行自定义命令
+- 支持并行和串行执行策略
+- 部署结果聚合和错误处理
+
+**关键特性**：
+- 组级部署协调
+- 并行/串行执行策略
+- 自定义命令执行（非YAML扫描）
+- 临时文件管理和清理
+- 部署结果统计和回滚
+
+**部署策略**：
+```
+组级触发 → 确定执行策略 → 并行/串行执行 → 结果聚合
+    ↓           ↓              ↓           ↓
+  触发事件   策略决策        命令执行     状态报告
+```
+
+### 3.4 日志系统 (Logging System)
+
+**职责**：
+- 结构化日志记录
+- 支持不同日志级别
+- 操作审计和追踪
+- 性能监控数据收集
+
+**特性**：
+- 结构化日志格式：`[timestamp] LEVEL: message [key=value]`
+- 操作链路追踪
+- 错误详情记录
+- 性能指标统计
+
+## 4. 数据流架构
+
+### 4.1 监控数据流
 
 ```
-sentry/
-├── main.go                    # 主程序 (~200行)
-├── config.go                  # 配置管理 (~100行)
-├── monitor.go                 # 监控服务 (~150行)
-├── deploy.go                  # 部署服务 (~100行)
-├── sentry.yaml                # 配置文件示例
-├── .env.example               # 环境变量示例
-├── go.mod
-├── go.sum
-├── Dockerfile
-├── Makefile
-├── README.md
-└── docs/
-    └── zh/
-        ├── architecture.md    # 架构文档
-        └── implementation.md  # 实现文档
+配置加载 → 服务初始化 → 监控循环 → 变化检测 → 组级触发
+    ↓          ↓          ↓         ↓          ↓
+ YAML解析   服务启动    定时轮询   SHA比较   策略执行
 ```
 
-**说明**：移除了单独的 git.go 和 kubectl.go，将其功能整合到 monitor.go 和 deploy.go 中，进一步简化结构。总代码量控制在 ~550行以内。
+**详细步骤**：
+1. **配置阶段**：加载YAML，验证仓库配置，初始化认证
+2. **监控阶段**：并发检查所有仓库的最新commit
+3. **检测阶段**：比较当前SHA与上次记录，识别变化
+4. **分组阶段**：根据仓库分组配置决定触发策略
+5. **执行阶段**：按组策略执行部署（并行/串行）
 
-## 7. 核心依赖
+### 4.2 部署数据流
 
+```
+组级触发 → 策略选择 → 任务分发 → 并发执行 → 结果聚合
+    ↓         ↓         ↓         ↓         ↓
+  变化事件   执行策略   工作队列   命令执行   状态汇总
+```
+
+**执行模式**：
+
+**并行模式**：
 ```go
-// go.mod
-require (
-    gopkg.in/yaml.v3           // YAML配置
-    github.com/joho/godotenv   // .env文件支持
-)
+for _, repo := range group {
+    go func(repoName string) {
+        // 克隆QA仓库
+        // 执行自定义命令
+        // 报告结果
+    }(repo)
+}
+wait() // 等待所有goroutine完成
 ```
 
-**优化说明**：移除了 `robfig/cron` 依赖，使用标准库的 `time.Ticker` 实现定时任务，减少外部依赖。
-
-## 8. 部署方式
-
-### 8.1 本地运行
-```bash
-# 1. 创建 .env 文件（推荐方式）
-cat > .env << EOF
-GITHUB_TOKEN=ghp_your_token_here
-GITLAB_TOKEN=glpat_your_token_here
-EOF
-
-# 2. 运行
-./sentry -action=watch     # 监控模式
-./sentry -action=trigger   # 手动触发
-
-# 或者直接设置环境变量
-export GITHUB_TOKEN=xxx GITLAB_TOKEN=xxx
-./sentry -action=watch
+**串行模式**：
+```go
+for _, repo := range group {
+    result := deployRepo(repo)
+    if !result.Success && !continueOnError {
+        break // 失败时停止
+    }
+}
 ```
 
-### 8.2 Docker 运行
-```dockerfile
-FROM golang:alpine AS builder
-COPY . .
-RUN go build -o sentry .
+## 5. 高级配置设计
 
-FROM alpine
-RUN apk add --no-cache git kubectl
-COPY --from=builder /sentry /usr/bin/
-CMD ["sentry", "watch"]
-```
+### 5.1 完整配置示例
 
-### 8.3 Kubernetes 部署
 ```yaml
-apiVersion: apps/v1
-kind: Deployment
+# 全局设置
+polling_interval: 60  # 最小60秒
+
+# 组配置
+groups:
+  ai-blueprints:
+    execution_strategy: "parallel"
+    max_parallel: 3
+    continue_on_error: true
+    global_timeout: 900
+  
+  critical-services:
+    execution_strategy: "sequential"
+    max_parallel: 1
+    continue_on_error: false
+    global_timeout: 1200
+
+# 仓库配置
+repositories:
+  - name: "rag-service"
+    group: "ai-blueprints"
+    monitor:
+      repo_url: "https://github.com/company/rag"
+      branches: ["main", "dev.*"]  # 支持正则
+      repo_type: "github"
+      auth:
+        username: "${GITHUB_USERNAME}"
+        token: "${GITHUB_TOKEN}"
+    deploy:
+      qa_repo_url: "https://gitlab.com/qa/pipelines"
+      qa_repo_branch: "main"
+      repo_type: "gitlab"
+      auth:
+        username: "${GITLAB_USERNAME}"
+        token: "${GITLAB_TOKEN}"
+      project_name: "rag"  # K8s命名规范
+      commands:
+        - "cd .tekton/rag"
+        - "kubectl apply -f . --namespace=tekton-pipelines"
+        - "./scripts/verify-deployment.sh"
+    webhook_url: ""  # 预留webhook功能
+
+  - name: "standalone-service"
+    # 无group字段 = 独立执行
+    monitor: { ... }
+    deploy: { ... }
+
+# 全局设置
+global:
+  tmp_dir: "/tmp/sentry"
+  cleanup: true
+  log_level: "info"
+  timeout: 300
+```
+
+### 5.2 配置层级关系
+
+```
+Global Config (全局配置)
+    ├── Groups (组配置)
+    │   ├── execution_strategy
+    │   ├── max_parallel
+    │   ├── continue_on_error
+    │   └── global_timeout
+    └── Repositories (仓库配置)
+        ├── Monitor Config (监控配置)
+        │   ├── repo_url, branches, repo_type
+        │   └── auth (username, token)
+        └── Deploy Config (部署配置)
+            ├── qa_repo_url, qa_repo_branch
+            ├── project_name, commands
+            └── auth (username, token)
+```
+
+## 6. 安全架构
+
+### 6.1 认证和授权
+
+**Git平台认证**：
+- 支持Personal Access Token
+- 环境变量安全管理
+- Token权限最小化原则
+
+**Kubernetes RBAC**：
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
 metadata:
-  name: sentry
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: sentry
-  template:
-    spec:
-      containers:
-      - name: sentry
-        image: sentry:latest
-        env:
-        - name: GITHUB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: git-tokens
-              key: github
-        - name: GITLAB_TOKEN  
-          valueFrom:
-            secretKeyRef:
-              name: git-tokens
-              key: gitlab
-        volumeMounts:
-        - name: config
-          mountPath: /config
-      volumes:
-      - name: config
-        configMap:
-          name: sentry-config
+  name: sentry-deployer
+rules:
+- apiGroups: ["tekton.dev"]
+  resources: ["pipelines", "pipelineruns", "tasks", "taskruns"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: [""]
+  resources: ["configmaps", "secrets"]
+  verbs: ["get", "list", "watch"]
 ```
 
-## 9. 实现策略
+### 6.2 安全边界
 
-### 9.1 最小可行产品 (MVP)
-1. **核心功能**：监控 + 部署
-2. **单文件实现**：所有逻辑在 main.go
-3. **简单配置**：YAML + 环境变量
-4. **基本错误处理**：记录日志，继续运行
-
-### 9.2 渐进优化
-1. **第一版**：功能可用
-2. **第二版**：代码结构优化
-3. **第三版**：错误处理完善
-4. **第四版**：性能优化
-
-## 10. 错误处理策略
-
-### 10.1 错误分类
-- **配置错误**：启动时检查，快速失败
-- **网络错误**：API调用失败，指数退避重试
-- **部署错误**：kubectl失败，记录日志继续监控
-- **Git错误**：仓库克隆失败，跳过本次部署
-
-### 10.2 监控和日志
-```go
-// 日志级别
-DEBUG: Git API详细调用信息
-INFO:  启动、变更检测、部署成功
-WARN:  重试、部分失败
-ERROR: 致命错误、配置错误
+```
+┌─────────────────────────────────────────┐
+│            Sentry Pod                   │
+│  ┌─────────────────────────────────────┐│
+│  │        应用进程                     ││
+│  │  ┌─────────────┐ ┌─────────────┐   ││
+│  │  │   监控服务  │ │   部署服务  │   ││
+│  │  └─────────────┘ └─────────────┘   ││
+│  └─────────────────────────────────────┘│
+│               │                         │
+├───────────────┼─────────────────────────┤
+│          网络边界                       │
+└───────────────┼─────────────────────────┘
+                │
+          ┌─────┴─────┐
+          │           │
+    ┌─────▼─────┐ ┌──▼──────────┐
+    │  Git APIs │ │ K8s APIs    │
+    │  (HTTPS)  │ │ (RBAC限制)  │
+    └───────────┘ └─────────────┘
 ```
 
-### 10.3 健康检查
-- 监控服务状态检查
-- 配置文件验证命令
-- 手动触发测试命令
+## 7. 性能和可扩展性
 
-## 11. 开发计划
+### 7.1 性能特征
 
-**Day 1-2: 基础功能**
-- [x] 项目结构设计
-- [ ] 配置加载和验证
-- [ ] Git API调用（GitHub/GitLab）
+- **内存使用**：约200-500MB（取决于仓库数量）
+- **CPU使用**：轻量级，主要是网络I/O等待
+- **网络**：定时Git API调用，部署时的Git clone
+- **存储**：临时文件存储，自动清理
 
-**Day 3-4: 核心逻辑**
-- [ ] 监控循环实现
-- [ ] 变更检测逻辑
-- [ ] 部署服务实现
+### 7.2 扩展性设计
 
-**Day 5-6: 集成测试**
-- [ ] 端到端测试
-- [ ] 错误处理完善
-- [ ] 日志和监控
+**水平扩展**：
+- 无状态设计，支持多实例部署
+- 基于仓库分片的负载均衡
+- Kubernetes HPA自动扩缩容
 
-**Day 7: 部署和文档**
-- [ ] Docker镜像构建
-- [ ] K8s部署配置
-- [ ] 用户文档
+**垂直扩展**：
+- 配置调优：轮询间隔、并发数、超时时间
+- 资源配额：内存、CPU限制
+- 存储优化：临时文件清理策略
 
-**总工作量**：1周，专注于核心功能实现。
+## 8. 监控和运维
+
+### 8.1 健康检查
+
+```yaml
+# Kubernetes健康检查
+livenessProbe:
+  exec:
+    command: ["./sentry", "-action=validate"]
+  initialDelaySeconds: 30
+  periodSeconds: 60
+
+readinessProbe:
+  exec:
+    command: ["./sentry", "-action=validate"]
+  initialDelaySeconds: 10
+  periodSeconds: 30
+```
+
+### 8.2 指标收集
+
+**应用指标**：
+- 监控仓库数量和状态
+- 部署成功/失败率
+- 平均部署时间
+- API调用延迟和错误率
+
+**系统指标**：
+- Pod资源使用情况
+- 网络连接状态
+- 存储空间使用
+
+## 9. 未来扩展
+
+### 9.1 计划中功能
+
+- **Webhook支持**：接收Git平台推送事件
+- **Web UI**：可视化监控界面和配置管理
+- **插件系统**：支持自定义部署策略
+- **多集群部署**：跨集群的部署协调
+
+### 9.2 技术演进
+
+- **事件驱动架构**：从轮询模式升级到事件驱动
+- **分布式部署**：支持更大规模的仓库监控
+- **AI集成**：智能部署策略推荐和异常检测
+
+---
+
+该架构设计确保了Sentry系统的可靠性、可扩展性和安全性，为企业级的CI/CD自动化提供坚实的技术基础。

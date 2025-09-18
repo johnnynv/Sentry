@@ -2,11 +2,12 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
 func TestExpandEnvVars(t *testing.T) {
-	// 设置测试环境变量
+	// Set test environment variables
 	os.Setenv("TEST_VAR", "test_value")
 	os.Setenv("GITHUB_TOKEN", "github_token_123")
 	defer os.Unsetenv("TEST_VAR")
@@ -48,92 +49,96 @@ func TestExpandEnvVars(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := expandEnvVars(tt.input)
 			if result != tt.expected {
-				t.Errorf("expandEnvVars() = %q, want %q", result, tt.expected)
+				t.Errorf("expandEnvVars() = %v, want %v", result, tt.expected)
 			}
 		})
 	}
 }
 
-func TestValidateRepoConfig(t *testing.T) {
+func TestValidateMonitorConfig(t *testing.T) {
 	tests := []struct {
-		name      string
-		repo      RepoConfig
-		repoName  string
-		wantError bool
+		name    string
+		monitor MonitorConfig
+		context string
+		wantErr bool
 	}{
 		{
-			name: "valid github config",
-			repo: RepoConfig{
-				Type:   "github",
-				URL:    "https://github.com/owner/repo",
-				Branch: "main",
-				Token:  "token123",
+			name: "valid monitor config",
+			monitor: MonitorConfig{
+				RepoURL:  "https://github.com/owner/repo",
+				Branches: []string{"main"},
+				RepoType: "github",
+				Auth: AuthConfig{
+					Username: "user",
+					Token:    "token",
+				},
 			},
-			repoName:  "test_repo",
-			wantError: false,
+			context: "test",
+			wantErr: false,
 		},
 		{
-			name: "valid gitlab config",
-			repo: RepoConfig{
-				Type:   "gitlab",
-				URL:    "https://gitlab.com/owner/repo",
-				Branch: "develop",
-				Token:  "token456",
+			name: "empty repo URL",
+			monitor: MonitorConfig{
+				RepoURL:  "",
+				Branches: []string{"main"},
+				RepoType: "github",
+				Auth: AuthConfig{
+					Username: "user",
+					Token:    "token",
+				},
 			},
-			repoName:  "test_repo",
-			wantError: false,
+			context: "test",
+			wantErr: true,
 		},
 		{
-			name: "invalid type",
-			repo: RepoConfig{
-				Type:   "bitbucket",
-				URL:    "https://bitbucket.org/owner/repo",
-				Branch: "main",
-				Token:  "token123",
+			name: "no branches",
+			monitor: MonitorConfig{
+				RepoURL:  "https://github.com/owner/repo",
+				Branches: []string{},
+				RepoType: "github",
+				Auth: AuthConfig{
+					Username: "user",
+					Token:    "token",
+				},
 			},
-			repoName:  "test_repo",
-			wantError: true,
+			context: "test",
+			wantErr: true,
 		},
 		{
-			name: "empty URL",
-			repo: RepoConfig{
-				Type:   "github",
-				URL:    "",
-				Branch: "main",
-				Token:  "token123",
+			name: "invalid repo type",
+			monitor: MonitorConfig{
+				RepoURL:  "https://github.com/owner/repo",
+				Branches: []string{"main"},
+				RepoType: "invalid",
+				Auth: AuthConfig{
+					Username: "user",
+					Token:    "token",
+				},
 			},
-			repoName:  "test_repo",
-			wantError: true,
-		},
-		{
-			name: "empty branch",
-			repo: RepoConfig{
-				Type:   "github",
-				URL:    "https://github.com/owner/repo",
-				Branch: "",
-				Token:  "token123",
-			},
-			repoName:  "test_repo",
-			wantError: true,
+			context: "test",
+			wantErr: true,
 		},
 		{
 			name: "empty token",
-			repo: RepoConfig{
-				Type:   "github",
-				URL:    "https://github.com/owner/repo",
-				Branch: "main",
-				Token:  "",
+			monitor: MonitorConfig{
+				RepoURL:  "https://github.com/owner/repo",
+				Branches: []string{"main"},
+				RepoType: "github",
+				Auth: AuthConfig{
+					Username: "user",
+					Token:    "",
+				},
 			},
-			repoName:  "test_repo",
-			wantError: true,
+			context: "test",
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateRepoConfig(&tt.repo, tt.repoName)
-			if (err != nil) != tt.wantError {
-				t.Errorf("validateRepoConfig() error = %v, wantError %v", err, tt.wantError)
+			err := validateMonitorConfig(&tt.monitor, tt.context)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateMonitorConfig() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
@@ -141,113 +146,213 @@ func TestValidateRepoConfig(t *testing.T) {
 
 func TestValidateConfig(t *testing.T) {
 	validConfig := &Config{
-		Monitor: MonitorConfig{
-			RepoA: RepoConfig{
-				Type:   "github",
-				URL:    "https://github.com/owner/repo-a",
-				Branch: "main",
-				Token:  "token123",
-			},
-			RepoB: RepoConfig{
-				Type:   "gitlab",
-				URL:    "https://gitlab.com/owner/repo-b",
-				Branch: "main",
-				Token:  "token456",
-			},
-			Poll: PollConfig{
-				Interval: 30,
-				Timeout:  10,
+		PollingInterval: 60,
+		Groups: map[string]GroupConfig{
+			"test-group": {
+				ExecutionStrategy: "parallel",
+				MaxParallel:       3,
+				ContinueOnError:   true,
+				GlobalTimeout:     900,
 			},
 		},
-		Deploy: DeployConfig{
-			Namespace: "tekton-pipelines",
-			TmpDir:    "/tmp/sentry",
-			Cleanup:   true,
+		Repositories: []RepositoryConfig{
+			{
+				Name:  "test-repo",
+				Group: "test-group",
+				Monitor: MonitorConfig{
+					RepoURL:  "https://github.com/test/repo",
+					Branches: []string{"main"},
+					RepoType: "github",
+					Auth: AuthConfig{
+						Username: "user",
+						Token:    "token",
+					},
+				},
+				Deploy: DeployConfig{
+					QARepoURL:    "https://gitlab.com/qa/repo",
+					QARepoBranch: "main",
+					RepoType:     "gitlab",
+					Auth: AuthConfig{
+						Username: "user",
+						Token:    "token",
+					},
+					ProjectName: "test",
+					Commands:    []string{"echo test"},
+				},
+			},
+		},
+		Global: GlobalConfig{
+			TmpDir:   "/tmp/test",
+			Cleanup:  true,
+			LogLevel: "info",
+			Timeout:  300,
 		},
 	}
 
-	t.Run("valid config", func(t *testing.T) {
-		err := validateConfig(validConfig)
-		if err != nil {
-			t.Errorf("validateConfig() with valid config should not error, got: %v", err)
-		}
-	})
+	tests := []struct {
+		name    string
+		config  *Config
+		wantErr bool
+	}{
+		{
+			name:    "valid config",
+			config:  validConfig,
+			wantErr: false,
+		},
+		{
+			name: "invalid polling interval",
+			config: &Config{
+				PollingInterval: 30, // Too low
+				Repositories: []RepositoryConfig{
+					{
+						Name: "test-repo",
+						Monitor: MonitorConfig{
+							RepoURL:  "https://github.com/test/repo",
+							Branches: []string{"main"},
+							RepoType: "github",
+							Auth: AuthConfig{
+								Username: "user",
+								Token:    "token",
+							},
+						},
+						Deploy: DeployConfig{
+							QARepoURL:    "https://gitlab.com/qa/repo",
+							QARepoBranch: "main",
+							RepoType:     "gitlab",
+							Auth: AuthConfig{
+								Username: "user",
+								Token:    "token",
+							},
+							ProjectName: "test",
+							Commands:    []string{"echo test"},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "no repositories",
+			config: &Config{
+				PollingInterval: 60,
+				Repositories:    []RepositoryConfig{},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid group reference",
+			config: &Config{
+				PollingInterval: 60,
+				Repositories: []RepositoryConfig{
+					{
+						Name:  "test-repo",
+						Group: "non-existent-group",
+						Monitor: MonitorConfig{
+							RepoURL:  "https://github.com/test/repo",
+							Branches: []string{"main"},
+							RepoType: "github",
+							Auth: AuthConfig{
+								Username: "user",
+								Token:    "token",
+							},
+						},
+						Deploy: DeployConfig{
+							QARepoURL:    "https://gitlab.com/qa/repo",
+							QARepoBranch: "main",
+							RepoType:     "gitlab",
+							Auth: AuthConfig{
+								Username: "user",
+								Token:    "token",
+							},
+							ProjectName: "test",
+							Commands:    []string{"echo test"},
+						},
+					},
+				},
+			},
+			wantErr: true,
+		},
+	}
 
-	t.Run("invalid poll interval", func(t *testing.T) {
-		config := *validConfig
-		config.Monitor.Poll.Interval = 0
-		err := validateConfig(&config)
-		if err == nil {
-			t.Error("validateConfig() with zero interval should error")
-		}
-	})
-
-	t.Run("invalid poll timeout", func(t *testing.T) {
-		config := *validConfig
-		config.Monitor.Poll.Timeout = -1
-		err := validateConfig(&config)
-		if err == nil {
-			t.Error("validateConfig() with negative timeout should error")
-		}
-	})
-
-	t.Run("empty namespace", func(t *testing.T) {
-		config := *validConfig
-		config.Deploy.Namespace = ""
-		err := validateConfig(&config)
-		if err == nil {
-			t.Error("validateConfig() with empty namespace should error")
-		}
-	})
-
-	t.Run("empty tmp_dir", func(t *testing.T) {
-		config := *validConfig
-		config.Deploy.TmpDir = ""
-		err := validateConfig(&config)
-		if err == nil {
-			t.Error("validateConfig() with empty tmp_dir should error")
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateConfig(tt.config)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestGetConfigExample(t *testing.T) {
 	example := GetConfigExample()
 	if len(example) == 0 {
-		t.Error("GetConfigExample() should return non-empty string")
+		t.Error("GetConfigExample() returned empty string")
 	}
-	
-	// 检查示例是否包含关键配置项
-	expectedItems := []string{
-		"monitor:",
-		"repo_a:",
-		"repo_b:",
-		"deploy:",
-		"namespace:",
-		"tmp_dir:",
-	}
-	
-	for _, item := range expectedItems {
-		if !contains(example, item) {
-			t.Errorf("GetConfigExample() should contain %q", item)
+
+	// Check if example contains expected sections
+	expectedSections := []string{"polling_interval", "groups", "repositories", "global"}
+	for _, section := range expectedSections {
+		if !strings.Contains(example, section) {
+			t.Errorf("GetConfigExample() missing section: %s", section)
 		}
 	}
 }
 
-// contains 检查字符串是否包含子字符串
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && 
-		   (s == substr || len(s) > len(substr) && 
-		    (s[:len(substr)] == substr || 
-		     s[len(s)-len(substr):] == substr || 
-		     indexOf(s, substr) >= 0))
-}
-
-// indexOf 查找子字符串的位置
-func indexOf(s, substr string) int {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
+func TestIsValidK8sName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{
+			name:     "valid lowercase",
+			input:    "test",
+			expected: true,
+		},
+		{
+			name:     "valid with hyphens",
+			input:    "test-name",
+			expected: true,
+		},
+		{
+			name:     "valid with numbers",
+			input:    "test123",
+			expected: true,
+		},
+		{
+			name:     "invalid uppercase",
+			input:    "Test",
+			expected: false,
+		},
+		{
+			name:     "invalid underscore",
+			input:    "test_name",
+			expected: false,
+		},
+		{
+			name:     "invalid start with hyphen",
+			input:    "-test",
+			expected: false,
+		},
+		{
+			name:     "invalid end with hyphen",
+			input:    "test-",
+			expected: false,
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: false,
+		},
 	}
-	return -1
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := isValidK8sName(tt.input)
+			if result != tt.expected {
+				t.Errorf("isValidK8sName(%s) = %v, want %v", tt.input, result, tt.expected)
+			}
+		})
+	}
 }

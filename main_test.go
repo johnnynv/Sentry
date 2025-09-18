@@ -6,323 +6,348 @@ import (
 )
 
 func TestParseCommandLineArgs(t *testing.T) {
-	// Test cases for command line argument parsing
-	tests := []struct {
-		name     string
-		args     []string
-		expected *AppConfig
-		wantExit bool
-	}{
-		{
-			name: "valid validate action",
-			args: []string{"sentry", "-action=validate"},
-			expected: &AppConfig{
-				Action:     "validate",
-				ConfigPath: "sentry.yaml",
-				Verbose:    false,
-			},
-			wantExit: false,
-		},
-		{
-			name: "valid trigger action with custom config",
-			args: []string{"sentry", "-action=trigger", "-config=test.yaml"},
-			expected: &AppConfig{
-				Action:     "trigger",
-				ConfigPath: "test.yaml",
-				Verbose:    false,
-			},
-			wantExit: false,
-		},
-		{
-			name: "valid watch action with verbose",
-			args: []string{"sentry", "-action=watch", "-verbose"},
-			expected: &AppConfig{
-				Action:     "watch",
-				ConfigPath: "sentry.yaml",
-				Verbose:    true,
-			},
-			wantExit: false,
-		},
+	// Save original args
+	originalArgs := os.Args
+	defer func() { os.Args = originalArgs }()
+
+	// Test valid arguments
+	os.Args = []string{"sentry", "-action=validate", "-config=test.yaml", "-verbose"}
+	config := parseCommandLineArgs()
+
+	if config.Action != "validate" {
+		t.Errorf("Expected action 'validate', got %s", config.Action)
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Skip actual command line parsing test as it would require
-			// complex test setup with os.Args manipulation
-			// Instead test the validation logic separately
+	if config.ConfigPath != "test.yaml" {
+		t.Errorf("Expected config path 'test.yaml', got %s", config.ConfigPath)
+	}
 
-			if tt.expected.Action != "" {
-				validActions := []string{"watch", "trigger", "validate"}
-				actionValid := false
-				for _, validAction := range validActions {
-					if tt.expected.Action == validAction {
-						actionValid = true
-						break
-					}
-				}
-
-				if !actionValid {
-					t.Errorf("Action '%s' should be invalid", tt.expected.Action)
-				}
-			}
-		})
+	if !config.Verbose {
+		t.Errorf("Expected verbose to be true")
 	}
 }
 
-func TestSentryAppValidateAction(t *testing.T) {
-	// Create test configuration
+func TestAppConfig(t *testing.T) {
+	config := &AppConfig{
+		Action:     "watch",
+		ConfigPath: "/path/to/config.yaml",
+		Verbose:    true,
+	}
+
+	if config.Action != "watch" {
+		t.Errorf("AppConfig.Action = %v, want %v", config.Action, "watch")
+	}
+
+	if config.ConfigPath != "/path/to/config.yaml" {
+		t.Errorf("AppConfig.ConfigPath = %v, want %v", config.ConfigPath, "/path/to/config.yaml")
+	}
+
+	if !config.Verbose {
+		t.Errorf("AppConfig.Verbose = %v, want %v", config.Verbose, true)
+	}
+}
+
+func TestSentryApp(t *testing.T) {
 	config := &Config{
-		Monitor: MonitorConfig{
-			RepoA: RepoConfig{
-				Type:   "github",
-				URL:    "https://github.com/test/repo-a",
-				Branch: "main",
-				Token:  "test-token",
-			},
-			RepoB: RepoConfig{
-				Type:   "gitlab",
-				URL:    "https://gitlab.com/test/repo-b",
-				Branch: "main",
-				Token:  "test-token",
+		PollingInterval: 60,
+		Repositories: []RepositoryConfig{
+			{
+				Name: "test-repo",
+				Monitor: MonitorConfig{
+					RepoURL:  "https://github.com/test/repo",
+					Branches: []string{"main"},
+					RepoType: "github",
+					Auth: AuthConfig{
+						Username: "user",
+						Token:    "token",
+					},
+				},
+				Deploy: DeployConfig{
+					QARepoURL:    "https://gitlab.com/qa/repo",
+					QARepoBranch: "main",
+					RepoType:     "gitlab",
+					Auth: AuthConfig{
+						Username: "user",
+						Token:    "token",
+					},
+					ProjectName: "test",
+					Commands:    []string{"echo test"},
+				},
 			},
 		},
-		Deploy: DeployConfig{
-			Namespace: "tekton-pipelines",
-			TmpDir:    "/tmp/sentry-test",
-			Cleanup:   true,
+		Global: GlobalConfig{
+			TmpDir:  "/tmp/test",
+			Cleanup: true,
 		},
+	}
+
+	deployService := NewDeployService(config)
+	monitorService := NewMonitorService(config, deployService)
+	appConfig := &AppConfig{
+		Action:     "validate",
+		ConfigPath: "test.yaml",
+		Verbose:    false,
 	}
 
 	app := &SentryApp{
 		config:         config,
-		monitorService: NewMonitorService(config, NewDeployService(config)),
-		deployService:  NewDeployService(config),
-		appConfig: &AppConfig{
-			Action: "validate",
-		},
+		monitorService: monitorService,
+		deployService:  deployService,
+		appConfig:      appConfig,
 	}
 
-	// Note: This test would normally fail because it tries to access real repositories
-	// and kubectl. In a real test environment, we would mock these dependencies.
-	// For now, we just test that the app structure is correct.
-
-	if app.config == nil {
-		t.Error("App config should not be nil")
+	if app.config != config {
+		t.Error("SentryApp.config not set correctly")
 	}
 
-	if app.monitorService == nil {
-		t.Error("Monitor service should not be nil")
+	if app.monitorService != monitorService {
+		t.Error("SentryApp.monitorService not set correctly")
 	}
 
-	if app.deployService == nil {
-		t.Error("Deploy service should not be nil")
+	if app.deployService != deployService {
+		t.Error("SentryApp.deployService not set correctly")
+	}
+
+	if app.appConfig != appConfig {
+		t.Error("SentryApp.appConfig not set correctly")
 	}
 }
 
-func TestAppConfigValidation(t *testing.T) {
-	tests := []struct {
-		name      string
-		action    string
-		wantValid bool
-	}{
-		{
-			name:      "valid validate action",
-			action:    "validate",
-			wantValid: true,
-		},
-		{
-			name:      "valid trigger action",
-			action:    "trigger",
-			wantValid: true,
-		},
-		{
-			name:      "valid watch action",
-			action:    "watch",
-			wantValid: true,
-		},
-		{
-			name:      "invalid action",
-			action:    "invalid",
-			wantValid: false,
-		},
-		{
-			name:      "empty action",
-			action:    "",
-			wantValid: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Test action validation logic
-			validActions := []string{"watch", "trigger", "validate"}
-			actionValid := false
-
-			if tt.action != "" {
-				for _, validAction := range validActions {
-					if tt.action == validAction {
-						actionValid = true
-						break
-					}
-				}
-			}
-
-			if actionValid != tt.wantValid {
-				t.Errorf("Action '%s' validation = %v, want %v", tt.action, actionValid, tt.wantValid)
-			}
-		})
-	}
-}
-
-func TestExecuteAction(t *testing.T) {
-	// Create minimal test configuration
-	config := &Config{
-		Monitor: MonitorConfig{
-			RepoA: RepoConfig{
-				Type:   "github",
-				URL:    "https://github.com/test/repo",
-				Branch: "main",
-				Token:  "test",
-			},
-			RepoB: RepoConfig{
-				Type:   "github",
-				URL:    "https://github.com/test/repo",
-				Branch: "main",
-				Token:  "test",
-			},
-		},
-		Deploy: DeployConfig{
-			Namespace: "test",
-			TmpDir:    "/tmp/test",
-			Cleanup:   true,
-		},
-	}
-
-	app := &SentryApp{
-		config:         config,
-		monitorService: NewMonitorService(config, NewDeployService(config)),
-		deployService:  NewDeployService(config),
-	}
-
-	// Test unknown action
-	app.appConfig = &AppConfig{Action: "unknown"}
-	err := app.executeAction()
-	if err == nil {
-		t.Error("executeAction() should return error for unknown action")
-	}
-
-	expectedError := "unknown action: unknown"
-	if err.Error() != expectedError {
-		t.Errorf("Expected error '%s', got '%s'", expectedError, err.Error())
-	}
-}
-
-func TestVersion(t *testing.T) {
+func TestVersionInfo(t *testing.T) {
+	// Test that version variables exist
 	if Version == "" {
 		t.Error("Version should not be empty")
 	}
 
-	// Version should follow semantic versioning format (basic check)
-	if len(Version) < 5 { // minimum: "1.0.0"
-		t.Errorf("Version '%s' seems too short", Version)
+	if BuildTime == "" {
+		t.Error("BuildTime should not be empty")
+	}
+
+	if GitCommit == "" {
+		t.Error("GitCommit should not be empty")
+	}
+
+	if GitBranch == "" {
+		t.Error("GitBranch should not be empty")
 	}
 }
 
-func TestSetupLogging(t *testing.T) {
-	// Test verbose logging setup
-	setupLogging(true)
+func TestPrintFunctions(t *testing.T) {
+	// Test that print functions don't panic
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("Print function panicked: %v", r)
+		}
+	}()
 
-	// Test normal logging setup
-	setupLogging(false)
-
-	// This test mainly ensures the function doesn't panic
-	// In a real test, we would verify log output configuration
-}
-
-func TestPrintBanner(t *testing.T) {
-	// Capture stdout to test banner output
-	// For simplicity, we just test that the function doesn't panic
+	printVersionInfo()
 	printBanner()
-}
-
-func TestPrintUsage(t *testing.T) {
-	// Test that printUsage doesn't panic
-	// In a real test, we would capture and verify the output
 	printUsage()
 }
 
-// Integration test helper to create test environment
-func createTestEnvironment(t *testing.T) (*Config, func()) {
-	// Create temporary directory for testing
-	tmpDir := "/tmp/sentry-test-" + t.Name()
-	err := os.MkdirAll(tmpDir, 0755)
-	if err != nil {
-		t.Fatalf("Failed to create test directory: %v", err)
-	}
+func TestExecuteActionValidation(t *testing.T) {
+	// Test action validation without actual execution
+	validActions := []string{"validate", "trigger", "watch"}
 
-	config := &Config{
-		Monitor: MonitorConfig{
-			RepoA: RepoConfig{
-				Type:   "github",
-				URL:    "https://github.com/test/repo-a",
-				Branch: "main",
-				Token:  "test-token-a",
-			},
-			RepoB: RepoConfig{
-				Type:   "gitlab",
-				URL:    "https://gitlab.com/test/repo-b",
-				Branch: "main",
-				Token:  "test-token-b",
-			},
-			Poll: PollConfig{
-				Interval: 30,
-				Timeout:  10,
-			},
-		},
-		Deploy: DeployConfig{
-			Namespace: "tekton-pipelines",
-			TmpDir:    tmpDir,
-			Cleanup:   true,
-		},
-	}
-
-	// Cleanup function
-	cleanup := func() {
-		os.RemoveAll(tmpDir)
-	}
-
-	return config, cleanup
-}
-
-func TestIntegrationSentryAppCreation(t *testing.T) {
-	config, cleanup := createTestEnvironment(t)
-	defer cleanup()
-
-	app := &SentryApp{
-		config:         config,
-		monitorService: NewMonitorService(config, NewDeployService(config)),
-		deployService:  NewDeployService(config),
-		appConfig: &AppConfig{
-			Action:     "validate",
+	for _, action := range validActions {
+		appConfig := &AppConfig{
+			Action:     action,
 			ConfigPath: "test.yaml",
 			Verbose:    false,
+		}
+
+		// Test that action is recognized
+		switch appConfig.Action {
+		case "validate", "trigger", "watch":
+			// Valid action
+		default:
+			t.Errorf("Action %s should be valid", action)
+		}
+	}
+}
+
+func TestCreateSimpleConfig(t *testing.T) {
+	// Test creating a simple config for testing
+	config := &Config{
+		PollingInterval: 60,
+		Repositories: []RepositoryConfig{
+			{
+				Name: "test-repo",
+				Monitor: MonitorConfig{
+					RepoURL:  "https://github.com/test/repo",
+					Branches: []string{"main"},
+					RepoType: "github",
+					Auth: AuthConfig{
+						Username: "testuser",
+						Token:    "testtoken",
+					},
+				},
+				Deploy: DeployConfig{
+					QARepoURL:    "https://gitlab.com/qa/repo",
+					QARepoBranch: "main",
+					RepoType:     "gitlab",
+					Auth: AuthConfig{
+						Username: "qauser",
+						Token:    "qatoken",
+					},
+					ProjectName: "test-project",
+					Commands:    []string{"echo 'test deployment'"},
+				},
+			},
+		},
+		Global: GlobalConfig{
+			TmpDir:   "/tmp/sentry-test",
+			Cleanup:  true,
+			LogLevel: "info",
+			Timeout:  300,
 		},
 	}
 
-	// Verify app components are properly initialized
-	if app.config != config {
-		t.Error("App config not set correctly")
+	// Validate the test config
+	err := validateConfig(config)
+	if err != nil {
+		t.Errorf("Test config validation failed: %v", err)
 	}
 
-	if app.monitorService == nil {
-		t.Error("Monitor service not initialized")
+	// Test that services can be created with this config
+	deployService := NewDeployService(config)
+	if deployService == nil {
+		t.Error("Failed to create DeployService with test config")
 	}
 
-	if app.deployService == nil {
-		t.Error("Deploy service not initialized")
+	monitorService := NewMonitorService(config, deployService)
+	if monitorService == nil {
+		t.Error("Failed to create MonitorService with test config")
+	}
+}
+
+func TestConfigWithGroups(t *testing.T) {
+	// Test configuration with groups
+	config := &Config{
+		PollingInterval: 60,
+		Groups: map[string]GroupConfig{
+			"test-group": {
+				ExecutionStrategy: "parallel",
+				MaxParallel:       2,
+				ContinueOnError:   true,
+				GlobalTimeout:     600,
+			},
+		},
+		Repositories: []RepositoryConfig{
+			{
+				Name:  "repo1",
+				Group: "test-group",
+				Monitor: MonitorConfig{
+					RepoURL:  "https://github.com/test/repo1",
+					Branches: []string{"main"},
+					RepoType: "github",
+					Auth: AuthConfig{
+						Username: "user",
+						Token:    "token",
+					},
+				},
+				Deploy: DeployConfig{
+					QARepoURL:    "https://gitlab.com/qa/repo",
+					QARepoBranch: "main",
+					RepoType:     "gitlab",
+					Auth: AuthConfig{
+						Username: "user",
+						Token:    "token",
+					},
+					ProjectName: "project1",
+					Commands:    []string{"echo 'deploy repo1'"},
+				},
+			},
+			{
+				Name:  "repo2",
+				Group: "test-group",
+				Monitor: MonitorConfig{
+					RepoURL:  "https://github.com/test/repo2",
+					Branches: []string{"main"},
+					RepoType: "github",
+					Auth: AuthConfig{
+						Username: "user",
+						Token:    "token",
+					},
+				},
+				Deploy: DeployConfig{
+					QARepoURL:    "https://gitlab.com/qa/repo",
+					QARepoBranch: "main",
+					RepoType:     "gitlab",
+					Auth: AuthConfig{
+						Username: "user",
+						Token:    "token",
+					},
+					ProjectName: "project2",
+					Commands:    []string{"echo 'deploy repo2'"},
+				},
+			},
+		},
+		Global: GlobalConfig{
+			TmpDir:  "/tmp/sentry-test",
+			Cleanup: true,
+		},
 	}
 
-	if app.appConfig.Action != "validate" {
-		t.Error("App config action not set correctly")
+	// Validate the config with groups
+	err := validateConfig(config)
+	if err != nil {
+		t.Errorf("Config with groups validation failed: %v", err)
+	}
+
+	// Test group configuration
+	group, exists := config.Groups["test-group"]
+	if !exists {
+		t.Error("Test group not found in config")
+	}
+
+	if group.ExecutionStrategy != "parallel" {
+		t.Errorf("Group execution strategy = %v, want %v", group.ExecutionStrategy, "parallel")
+	}
+
+	if group.MaxParallel != 2 {
+		t.Errorf("Group max parallel = %v, want %v", group.MaxParallel, 2)
+	}
+}
+
+func TestGrouping(t *testing.T) {
+	// Test grouping logic (similar to triggerAction)
+	repositories := []RepositoryConfig{
+		{Name: "repo1", Group: "group1"},
+		{Name: "repo2", Group: "group1"},
+		{Name: "repo3", Group: ""}, // Individual
+		{Name: "repo4", Group: "group2"},
+	}
+
+	groups := make(map[string][]string)
+	individual := make([]string, 0)
+
+	for _, repo := range repositories {
+		if repo.Group != "" {
+			groups[repo.Group] = append(groups[repo.Group], repo.Name)
+		} else {
+			individual = append(individual, repo.Name)
+		}
+	}
+
+	// Verify grouping results
+	if len(groups) != 2 {
+		t.Errorf("Expected 2 groups, got %d", len(groups))
+	}
+
+	if len(groups["group1"]) != 2 {
+		t.Errorf("Expected 2 repos in group1, got %d", len(groups["group1"]))
+	}
+
+	if len(groups["group2"]) != 1 {
+		t.Errorf("Expected 1 repo in group2, got %d", len(groups["group2"]))
+	}
+
+	if len(individual) != 1 {
+		t.Errorf("Expected 1 individual repo, got %d", len(individual))
+	}
+
+	if individual[0] != "repo3" {
+		t.Errorf("Expected repo3 as individual, got %s", individual[0])
 	}
 }

@@ -135,42 +135,71 @@ func (app *SentryApp) executeAction() error {
 func (app *SentryApp) validateAction() error {
 	AppLogger.Info("Starting configuration and environment validation...")
 
-	// Validate deployment environment
-	if err := app.deployService.ValidateDeploymentEnvironment(); err != nil {
-		return fmt.Errorf("deployment environment validation failed: %w", err)
-	}
-
-	// Test repository connectivity
+	// Test repository connectivity for all configured repositories
 	AppLogger.Info("Testing repository connectivity...")
 
-	// Test repository A
-	if err := app.testRepositoryConnectivity(&app.config.Monitor.RepoA, "Repository A"); err != nil {
-		return fmt.Errorf("repository A connectivity test failed: %w", err)
-	}
+	for _, repo := range app.config.Repositories {
+		// Test monitor repository connectivity
+		if err := app.testRepositoryConnectivity(&repo.Monitor, fmt.Sprintf("Monitor repo %s", repo.Name)); err != nil {
+			return fmt.Errorf("monitor repository %s connectivity test failed: %w", repo.Name, err)
+		}
 
-	// Test repository B
-	if err := app.testRepositoryConnectivity(&app.config.Monitor.RepoB, "Repository B"); err != nil {
-		return fmt.Errorf("repository B connectivity test failed: %w", err)
+		// Test deploy repository connectivity
+		if err := app.testQARepositoryConnectivity(&repo.Deploy, fmt.Sprintf("Deploy repo %s", repo.Name)); err != nil {
+			return fmt.Errorf("deploy repository %s connectivity test failed: %w", repo.Name, err)
+		}
 	}
 
 	AppLogger.Info("All validation checks passed successfully!")
 	return nil
 }
 
-// triggerAction manually triggers deployment from both repositories
+// triggerAction manually triggers deployment for all configured repositories
 func (app *SentryApp) triggerAction() error {
 	AppLogger.Info("Starting manual deployment trigger...")
 
-	// Trigger deployment from repository A
-	AppLogger.Info("Triggering deployment from Repository A...")
-	if err := app.triggerDeployment(&app.config.Monitor.RepoA, "repo_a"); err != nil {
-		return fmt.Errorf("deployment from Repository A failed: %w", err)
+	// Group repositories by their groups
+	groups := make(map[string][]string)
+	individual := make([]string, 0)
+
+	for _, repo := range app.config.Repositories {
+		if repo.Group != "" {
+			groups[repo.Group] = append(groups[repo.Group], repo.Name)
+		} else {
+			individual = append(individual, repo.Name)
+		}
 	}
 
-	// Trigger deployment from repository B
-	AppLogger.Info("Triggering deployment from Repository B...")
-	if err := app.triggerDeployment(&app.config.Monitor.RepoB, "repo_b"); err != nil {
-		return fmt.Errorf("deployment from Repository B failed: %w", err)
+	// Trigger group deployments
+	for groupName, repoNames := range groups {
+		groupConfig := app.config.Groups[groupName]
+		AppLogger.InfoS("Triggering group deployment", "group", groupName, "repositories", repoNames)
+
+		if err := app.deployService.DeployGroup(groupName, repoNames, &groupConfig); err != nil {
+			return fmt.Errorf("group %s deployment failed: %w", groupName, err)
+		}
+	}
+
+	// Trigger individual deployments
+	for _, repoName := range individual {
+		AppLogger.InfoS("Triggering individual deployment", "repo", repoName)
+
+		// Find repo config
+		var repoConfig *RepositoryConfig
+		for _, repo := range app.config.Repositories {
+			if repo.Name == repoName {
+				repoConfig = &repo
+				break
+			}
+		}
+
+		if repoConfig == nil {
+			return fmt.Errorf("repository configuration not found: %s", repoName)
+		}
+
+		if err := app.deployService.DeployIndividual(repoConfig); err != nil {
+			return fmt.Errorf("individual deployment %s failed: %w", repoName, err)
+		}
 	}
 
 	AppLogger.Info("Manual deployment trigger completed successfully!")
@@ -201,35 +230,42 @@ func (app *SentryApp) watchAction() error {
 	}
 }
 
-// testRepositoryConnectivity tests if repository is accessible
-func (app *SentryApp) testRepositoryConnectivity(repo *RepoConfig, repoName string) error {
-	AppLogger.Info("Testing connectivity to %s (%s)...", repoName, repo.URL)
+// testRepositoryConnectivity tests if monitor repository is accessible
+func (app *SentryApp) testRepositoryConnectivity(monitor *MonitorConfig, repoName string) error {
+	AppLogger.Info("Testing connectivity to %s (%s)...", repoName, monitor.RepoURL)
 
-	// Try to get latest commit to test connectivity
-	commit, err := app.monitorService.GetLatestCommit(repo)
-	if err != nil {
-		return fmt.Errorf("failed to access repository: %w", err)
+	// Test each configured branch
+	for _, branch := range monitor.Branches {
+		// Try to get latest commit to test connectivity
+		commit, err := app.monitorService.GetLatestCommit(monitor, branch)
+		if err != nil {
+			return fmt.Errorf("failed to access repository %s branch %s: %w", repoName, branch, err)
+		}
+
+		AppLogger.LogRepositoryCheck(fmt.Sprintf("%s:%s", repoName, branch), true, commit.SHA, commit.Author)
 	}
 
-	AppLogger.LogRepositoryCheck(repoName, true, commit.SHA, commit.Author)
 	return nil
 }
 
-// triggerDeployment manually triggers deployment from a repository
-func (app *SentryApp) triggerDeployment(repo *RepoConfig, repoKey string) error {
-	// Deploy from repository
-	result, err := app.deployService.DeployFromRepository(repo, repoKey)
+// testQARepositoryConnectivity tests if QA repository is accessible for deployment
+func (app *SentryApp) testQARepositoryConnectivity(deploy *DeployConfig, repoName string) error {
+	AppLogger.Info("Testing QA repository connectivity for %s (%s)...", repoName, deploy.QARepoURL)
+
+	// Create a temporary monitor config for testing QA repo access
+	testMonitor := &MonitorConfig{
+		RepoURL:  deploy.QARepoURL,
+		RepoType: deploy.RepoType,
+		Auth:     deploy.Auth,
+	}
+
+	// Try to get latest commit to test connectivity
+	commit, err := app.monitorService.GetLatestCommit(testMonitor, deploy.QARepoBranch)
 	if err != nil {
-		AppLogger.LogDeploymentFailure(repoKey, err)
-		return fmt.Errorf("deployment failed: %w", err)
+		return fmt.Errorf("failed to access QA repository: %w", err)
 	}
 
-	if !result.Success {
-		AppLogger.LogDeploymentFailure(repoKey, fmt.Errorf(result.Error))
-		return fmt.Errorf("deployment unsuccessful: %s", result.Error)
-	}
-
-	AppLogger.LogDeploymentSuccess(repoKey, len(result.FilesDeployed))
+	AppLogger.LogRepositoryCheck(fmt.Sprintf("%s:QA", repoName), true, commit.SHA, commit.Author)
 	return nil
 }
 
@@ -249,21 +285,10 @@ func (app *SentryApp) startMonitoring() error {
 
 // runMonitoringLoop runs the main monitoring loop with deployment triggers
 func (app *SentryApp) runMonitoringLoop() error {
-	// Note: This is a simplified version. In a real implementation,
-	// we would need to modify MonitorService to support callbacks
-	// or create a custom monitoring loop that checks for changes
-	// and triggers deployments accordingly.
+	AppLogger.Info("Starting monitoring loop (checking every %d seconds)...", app.config.PollingInterval)
 
-	AppLogger.Info("Starting monitoring loop (checking every %d seconds)...", app.config.Monitor.Poll.Interval)
-
-	// For now, use the existing StartMonitoring method
-	// In a production version, we would enhance this to trigger deployments
+	// Use the MonitorService which now includes deployment triggering
 	return app.monitorService.StartMonitoring()
-}
-
-// setupLogging is deprecated - use InitializeLogger instead
-func setupLogging(verbose bool) {
-	InitializeLogger(verbose)
 }
 
 // printVersionInfo prints detailed version information

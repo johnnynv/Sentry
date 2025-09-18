@@ -73,27 +73,42 @@ helm install sentry-prod ./helm/sentry -f ./helm/sentry/values-production.yaml
 Create a `sentry.yaml` configuration file:
 
 ```yaml
-monitor:
-  repo_a:
-    type: "github"
-    url: "https://github.com/owner/repo-a"
-    branch: "main"
-    token: "${GITHUB_TOKEN}"
-  
-  repo_b:
-    type: "gitlab"
-    url: "https://gitlab.com/owner/repo-b"
-    branch: "main"
-    token: "${GITLAB_TOKEN}"
-  
-  poll:
-    interval: 30
-    timeout: 10
+polling_interval: 60
 
-deploy:
-  namespace: "tekton-pipelines"
+groups:
+  my-projects:
+    execution_strategy: "parallel"
+    max_parallel: 3
+    continue_on_error: true
+    global_timeout: 900
+
+repositories:
+  - name: "my-project"
+    group: "my-projects"
+    monitor:
+      repo_url: "https://github.com/owner/repo"
+      branches: ["main"]
+      repo_type: "github"
+      auth:
+        username: "${GITHUB_USERNAME}"
+        token: "${GITHUB_TOKEN}"
+    deploy:
+      qa_repo_url: "https://gitlab.com/qa/repo"
+      qa_repo_branch: "main"
+      repo_type: "gitlab"
+      auth:
+        username: "${GITLAB_USERNAME}"
+        token: "${GITLAB_TOKEN}"
+      project_name: "my-project"
+      commands:
+        - "cd .tekton/my-project"
+        - "kubectl apply -f . --namespace=tekton-pipelines"
+
+global:
   tmp_dir: "/tmp/sentry"
   cleanup: true
+  log_level: "info"
+  timeout: 300
 ```
 
 Set environment variables:
@@ -185,12 +200,27 @@ Create a `my-values.yaml`:
 
 ```yaml
 config:
-  monitor:
-    repo_a:
-      type: "github"
-      url: "https://github.com/your-org/your-repo"
-      branch: "main"
-      token: "${GITHUB_TOKEN}"
+  pollingInterval: 60
+  repositories:
+    - name: "my-project"
+      monitor:
+        repo_url: "https://github.com/your-org/your-repo"
+        branches: ["main"]
+        repo_type: "github"
+        auth:
+          username: "${GITHUB_USERNAME}"
+          token: "${GITHUB_TOKEN}"
+      deploy:
+        qa_repo_url: "https://gitlab.com/qa/repo"
+        qa_repo_branch: "main"
+        repo_type: "gitlab"
+        auth:
+          username: "${GITLAB_USERNAME}"
+          token: "${GITLAB_TOKEN}"
+        project_name: "my-project"
+        commands:
+          - "cd .tekton/my-project"
+          - "kubectl apply -f ."
 
 secrets:
   githubToken: "your_github_token"

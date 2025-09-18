@@ -1,26 +1,63 @@
 # Sentry configuration file
-monitor:
-  # Repository A configuration (GitHub)
-  repo_a:
-    type: "github"
-    url: "https://github.com/NVIDIA-AI-Blueprints/rag"
-    branch: "main"
-    token: "${GITHUB_TOKEN}"  # Environment variable from .env file
-  
-  # Repository B configuration (GitLab)  
-  repo_b:
-    type: "gitlab"
-    url: "https://gitlab-master.nvidia.com/cloud-service-qa/Blueprint/blueprint-github-test"
-    branch: "main"
-    token: "${GITLAB_TOKEN}"  # Environment variable from .env file
-  
-  # Polling configuration
-  poll:
-    interval: 30  # Poll interval in seconds
-    timeout: 10   # Request timeout in seconds
+polling_interval: 60  # Poll interval in seconds (minimum 60)
 
-# Deployment configuration
-deploy:
-  namespace: "tekton-pipelines"  # Kubernetes namespace
-  tmp_dir: "/tmp/sentry"         # Temporary directory
-  cleanup: true                  # Auto cleanup temporary files
+# Global group configurations
+groups:
+  ai-blueprints:
+    execution_strategy: "parallel"  # parallel | sequential
+    max_parallel: 3
+    continue_on_error: true
+    global_timeout: 900  # 15 minutes
+
+# Repository configurations
+repositories:
+  - name: "rag-project"
+    group: "ai-blueprints"  # Optional group assignment
+    monitor:
+      # repo_url: "https://github.com/NVIDIA-AI-Blueprints/rag"
+      repo_url: "https://github.com/johnnynv/rag"
+      branches: ["main", "dev"]  # Multiple branches supported
+      repo_type: "github"
+      auth:
+        username: "${GITHUB_USERNAME}"
+        token: "${GITHUB_TOKEN}"
+    deploy:
+      qa_repo_url: "https://gitlab-master.nvidia.com/cloud-service-qa/Blueprint/blueprint-github-test"
+      qa_repo_branch: "rag-tekton-workflow"
+      repo_type: "gitlab"
+      auth:
+        username: "${GITLAB_USERNAME}"
+        token: "${GITLAB_TOKEN}"
+      project_name: "rag"  # Must follow k8s naming conventions
+      commands:
+        - "cd .tekton/rag && ./scripts/container-deployment-pipeline-onclick.sh"
+    webhook_url: ""
+
+  - name: "chatbot-project"
+    group: "ai-blueprints"  # Same group for batch processing
+    monitor:
+      # repo_url: "https://github.com/NVIDIA-AI-Blueprints/rag"
+      repo_url: "https://github.com/johnnynv/rag"
+      branches: ["main", "dev"]  # Multiple branches supported
+      repo_type: "github"
+      auth:
+        username: "${GITHUB_USERNAME}"
+        token: "${GITHUB_TOKEN}"
+    deploy:
+      qa_repo_url: "https://gitlab-master.nvidia.com/cloud-service-qa/Blueprint/blueprint-github-test"
+      qa_repo_branch: "rag-tekton-workflow"
+      repo_type: "gitlab"
+      auth:
+        username: "${GITLAB_USERNAME}"
+        token: "${GITLAB_TOKEN}"
+      project_name: "chatbot"
+      commands:
+        - "cd .tekton/chatbot && ./scripts/container-deployment-pipeline-onclick.sh"
+    webhook_url: ""
+
+# Global settings (optional)
+global:
+  tmp_dir: "/tmp/sentry"
+  cleanup: true
+  log_level: "info"
+  timeout: 300

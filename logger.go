@@ -96,6 +96,59 @@ func (l *Logger) Fatal(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
+// StructuredLog logs a structured message with key-value pairs
+func (l *Logger) StructuredLog(level LogLevel, message string, kvPairs ...interface{}) {
+	if level < l.level {
+		return
+	}
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	prefix := fmt.Sprintf("[%s] %s: ", timestamp, level.String())
+
+	// Build structured message
+	var structuredMessage string
+	if len(kvPairs) == 0 {
+		structuredMessage = message
+	} else {
+		structuredMessage = fmt.Sprintf("%s", message)
+		if len(kvPairs)%2 == 0 {
+			// Properly paired key-value pairs
+			for i := 0; i < len(kvPairs); i += 2 {
+				key := fmt.Sprintf("%v", kvPairs[i])
+				value := fmt.Sprintf("%v", kvPairs[i+1])
+				structuredMessage += fmt.Sprintf(" [%s=%s]", key, value)
+			}
+		} else {
+			// Odd number of arguments, treat as additional values
+			for _, arg := range kvPairs {
+				structuredMessage += fmt.Sprintf(" [%v]", arg)
+			}
+		}
+	}
+
+	l.logger.Printf("%s%s", prefix, structuredMessage)
+}
+
+// InfoS logs a structured info message
+func (l *Logger) InfoS(message string, kvPairs ...interface{}) {
+	l.StructuredLog(LogLevelInfo, message, kvPairs...)
+}
+
+// WarnS logs a structured warning message
+func (l *Logger) WarnS(message string, kvPairs ...interface{}) {
+	l.StructuredLog(LogLevelWarn, message, kvPairs...)
+}
+
+// ErrorS logs a structured error message
+func (l *Logger) ErrorS(message string, kvPairs ...interface{}) {
+	l.StructuredLog(LogLevelError, message, kvPairs...)
+}
+
+// DebugS logs a structured debug message
+func (l *Logger) DebugS(message string, kvPairs ...interface{}) {
+	l.StructuredLog(LogLevelDebug, message, kvPairs...)
+}
+
 // LogRepositoryCheck logs repository monitoring activity
 func (l *Logger) LogRepositoryCheck(repoKey string, success bool, commitSHA string, author string) {
 	if success {
@@ -141,6 +194,16 @@ func (l *Logger) LogAPICall(service string, url string, statusCode int, duration
 	} else {
 		l.Warn("API call failed: %s %s - %d (%v)", service, url, statusCode, duration)
 	}
+}
+
+// LogGroupDeploymentSuccess logs successful group deployment
+func (l *Logger) LogGroupDeploymentSuccess(groupName string, repoCount int, duration string) {
+	l.Info("Group deployment successful: %s - %d repositories deployed in %s", groupName, repoCount, duration)
+}
+
+// LogGroupDeploymentFailure logs group deployment failure
+func (l *Logger) LogGroupDeploymentFailure(groupName string, err error) {
+	l.Error("Group deployment failed: %s - %v", groupName, err)
 }
 
 // Global logger instance
