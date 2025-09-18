@@ -1,26 +1,26 @@
 # Sentry English Documentation
 
-Welcome to Sentry - the Tekton Pipeline Auto-Deployer! This directory contains comprehensive English documentation.
+Welcome to Sentry - Tekton Pipeline Auto-Deployer! This directory contains comprehensive English documentation.
 
 ## 📚 Documentation Index
 
 ### Core Documentation
 
-- **[Deployment Guide](deployment.md)** - Comprehensive deployment instructions with Helm Chart focus
-- **[Architecture Design](architecture.md)** - System architecture and design principles
-- **[Implementation Plan](implementation.md)** - Project implementation and development planning
+- **[Deployment Guide](deployment.md)** - Detailed deployment instructions, primarily using Helm Chart
+- **[Architecture Design](architecture.md)** - System architecture and design principles  
+- **[Implementation Plan](implementation.md)** - Project implementation and development roadmap
 
-### Quick Links
+### Quick Reference
 
-| Document | Description | Target Users |
-|----------|-------------|--------------|
+| Document | Description | Recommended Users |
+|----------|-------------|-------------------|
 | [Deployment Guide](deployment.md) | 🚀 Helm Chart deployment, YAML manifests, Docker deployment | DevOps Engineers, SRE |
 | [Architecture Design](architecture.md) | 🏗️ System architecture, component relationships, technology choices | Developers, Architects |
-| [Implementation Plan](implementation.md) | 📋 Development plan, phase breakdown, timeline scheduling | Project Managers, Development Teams |
+| [Implementation Plan](implementation.md) | 📋 Development plan, phase breakdown, timeline | Project Managers, Development Teams |
 
 ## 🚀 Quick Start
 
-If you're using Sentry for the first time, we recommend reading in this order:
+If you're new to Sentry, we recommend reading in this order:
 
 1. **Understand the System** - Read [Architecture Design](architecture.md) to understand how Sentry works
 2. **Deploy the System** - Follow [Deployment Guide](deployment.md) to deploy Sentry in your environment
@@ -28,16 +28,16 @@ If you're using Sentry for the first time, we recommend reading in this order:
 
 ## 📖 Key Features
 
-Sentry provides the following core functionalities:
+Sentry provides the following core capabilities:
 
 - ✅ **Multi-Platform Support** - Supports GitHub, GitLab, Gitea and other Git platforms
 - ✅ **Intelligent Monitoring** - Automatically detects code repository changes and triggers deployments
 - ✅ **Group-Level Deployment** - Supports parallel and sequential batch deployment strategies
-- ✅ **Flexible Configuration** - Supports multiple deployment commands and custom scripts
-- ✅ **Secure and Reliable** - Complete RBAC permission control and error recovery mechanisms
-- ✅ **Cloud-Native** - Optimized for Kubernetes and Tekton Pipelines
+- ✅ **Flexible Configuration** - Supports various deployment commands and custom scripts
+- ✅ **Security & Reliability** - Complete RBAC permission control and error recovery mechanisms
+- ✅ **Cloud-Native** - Optimized design for Kubernetes and Tekton Pipelines
 
-## 🎯 Deployment Method Comparison
+## 🎯 Deployment Methods Comparison
 
 | Deployment Method | Use Case | Complexity | Recommendation |
 |-------------------|----------|------------|----------------|
@@ -47,7 +47,7 @@ Sentry provides the following core functionalities:
 
 ## 🔧 System Requirements
 
-### Basic Environment
+### Base Environment
 - Kubernetes 1.20+
 - Tekton Pipelines
 - kubectl access permissions
@@ -96,22 +96,22 @@ groups:
 repositories:
   - name: "rag-service"
     group: "ai-projects"
-    # ... detailed configuration see deployment guide
+    # ... detailed configuration in deployment guide
 ```
 
 ## 🆘 Getting Help
 
-Problem resolution path when encountering issues:
+When encountering issues, follow this resolution path:
 
 1. **Check Logs** - Use `kubectl logs` to view detailed error information
-2. **Verify Configuration** - Validate YAML configuration file format and content
+2. **Verify Configuration** - Validate YAML configuration file format and content  
 3. **Permission Verification** - Confirm token permissions and RBAC configuration
 4. **Reference Documentation** - Check troubleshooting sections in relevant chapters
 5. **Community Support** - Submit issues in the project repository
 
 ## 🔄 Documentation Updates
 
-This documentation is updated synchronously with project versions. Current documentation version:
+This documentation is updated synchronously with project versions. Current documentation corresponds to:
 
 - **Sentry Version**: v1.0.0
 - **Documentation Version**: v1.0.0
@@ -119,4 +119,4 @@ This documentation is updated synchronously with project versions. Current docum
 
 ---
 
-**Note**: For Chinese version documentation, please refer to the README.md file in the project root directory.
+**Note**: For Chinese version documentation, please refer to the `docs/zh/` directory.

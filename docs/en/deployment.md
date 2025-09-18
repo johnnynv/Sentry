@@ -1,513 +1,535 @@
 # Sentry Deployment Guide
 
-This document provides comprehensive instructions for deploying Sentry - the Tekton Pipeline Auto-Deployer in Kubernetes clusters. We recommend using Helm Chart for deployment, with alternative deployment methods as backup options.
+This guide provides complete Sentry deployment, operations, and troubleshooting instructions based on actual E2E testing experience.
 
-## 📋 Prerequisites
+## Table of Contents
+- [Prerequisites](#prerequisites)
+- [Quick Deployment](#quick-deployment)
+- [Detailed Deployment Steps](#detailed-deployment-steps)
+- [Post-Deployment Operations](#post-deployment-operations)
+- [Configuration Updates](#configuration-updates)
+- [Log Viewing and Debugging](#log-viewing-and-debugging)
+- [Troubleshooting](#troubleshooting)
+- [Best Practices](#best-practices)
 
-### Required Components
+## Prerequisites
 
-- **Kubernetes Cluster**: 1.20+
-- **Helm**: 3.0+
-- **Tekton Pipelines**: Installed in the cluster
-- **kubectl**: Configured with cluster access permissions
-
-### Access Credentials
-
-- **GitHub Token**: Personal Access Token with repository read permissions
-- **GitLab Token**: Access Token with API and repository read permissions
-
-### Environment Verification
-
+### 1. Prepare GitHub/GitLab Access Tokens
 ```bash
-# Check Kubernetes connectivity
-kubectl cluster-info
+# GitHub Personal Access Token (requires repo permissions)
+export GITHUB_TOKEN="ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
-# Check Helm version
-helm version
-
-# Check Tekton Pipelines
-kubectl get pods -n tekton-pipelines
-
-# Check namespace permissions
-kubectl auth can-i create deployments --namespace=sentry-system
+# GitLab Access Token (requires api, read_repository permissions)  
+export GITLAB_TOKEN="glpat-xxxxxxxxxxxxxxxxxxxxx"
 ```
 
-## 🚀 Method 1: Helm Chart Deployment (Recommended)
-
-### 1. Quick Start
-
-#### Basic Deployment
-
+### 2. Prepare Container Image Access
+If using private image registry (like GHCR), prepare Docker registry authentication:
 ```bash
-# Clone the project (if not already done)
-git clone <your-repo-url>
-cd Sentry
-
-# Install with default configuration
-helm install sentry ./helm/sentry \
-  --create-namespace \
-  --namespace sentry-system \
-  --set secrets.githubToken="your_github_token_here" \
-  --set secrets.gitlabToken="your_gitlab_token_here"
+# Create docker registry secret (must be created in each target namespace)
+kubectl create secret docker-registry ghcr-secret \
+  --docker-server=ghcr.io \
+  --docker-username=your_github_username \
+  --docker-password=$GITHUB_TOKEN \
+  --namespace=target-namespace
 ```
 
-#### Verify Deployment
-
+### 3. Build and Push Image (if needed)
 ```bash
-# Check Pod status
-kubectl get pods -n sentry-system
+# Build image
+cd /path/to/sentry
+docker build -t ghcr.io/your_username/sentry:1.0.0 .
 
-# View logs
-kubectl logs -f deployment/sentry -n sentry-system
-
-# Check service status
-kubectl get all -n sentry-system
+# Push to GHCR
+echo $GITHUB_TOKEN | docker login ghcr.io -u your_username --password-stdin
+docker push ghcr.io/your_username/sentry:1.0.0
 ```
 
-### 2. Custom Configuration Deployment
+## Quick Deployment
 
-#### Create Custom Values File
-
-Create `my-values.yaml`:
-
-```yaml
-# Image configuration
-image:
-  repository: your-registry/sentry
-  tag: "1.0.0"
-  pullPolicy: IfNotPresent
-
-# Resource configuration
-resources:
-  requests:
-    memory: "256Mi"
-    cpu: "200m"
-  limits:
-    memory: "512Mi"
-    cpu: "500m"
-
-# Application configuration
-config:
-  pollingInterval: 60
-  
-  # Global group configurations
-  groups:
-    ai-projects:
-      execution_strategy: "parallel"
-      max_parallel: 3
-      continue_on_error: true
-      global_timeout: 900
-    
-    critical-services:
-      execution_strategy: "sequential"
-      max_parallel: 1
-      continue_on_error: false
-      global_timeout: 1200
-
-  # Repository configurations
-  repositories:
-    - name: "rag-pipeline"
-      group: "ai-projects"
-      monitor:
-        repo_url: "https://github.com/company/rag-service"
-        branches: ["main", "develop"]
-        repo_type: "github"
-        auth:
-          username: "${GITHUB_USERNAME}"
-          token: "${GITHUB_TOKEN}"
-      deploy:
-        qa_repo_url: "https://gitlab.company.com/qa/pipelines"
-        qa_repo_branch: "main"
-        repo_type: "gitlab"
-        auth:
-          username: "${GITLAB_USERNAME}"
-          token: "${GITLAB_TOKEN}"
-        project_name: "rag"
-        commands:
-          - "cd .tekton/rag"
-          - "kubectl apply -f . --namespace=tekton-pipelines"
-          - "./scripts/verify-deployment.sh"
-      webhook_url: ""
-
-    - name: "chatbot-pipeline"
-      group: "ai-projects"
-      monitor:
-        repo_url: "https://github.com/company/chatbot-service"
-        branches: ["main"]
-        repo_type: "github"
-        auth:
-          username: "${GITHUB_USERNAME}"
-          token: "${GITHUB_TOKEN}"
-      deploy:
-        qa_repo_url: "https://gitlab.company.com/qa/pipelines"
-        qa_repo_branch: "main"
-        repo_type: "gitlab"
-        auth:
-          username: "${GITLAB_USERNAME}"
-          token: "${GITLAB_TOKEN}"
-        project_name: "chatbot"
-        commands:
-          - "cd .tekton/chatbot"
-          - "kubectl apply -f . --namespace=tekton-pipelines"
-
-  # Global settings
-  global:
-    tmp_dir: "/tmp/sentry"
-    cleanup: true
-    log_level: "info"
-    timeout: 300
-
-# Secret configuration
-secrets:
-  githubToken: "your_github_token"
-  gitlabToken: "your_gitlab_token"
-
-# Security configuration
-rbac:
-  create: true
-  rules:
-    - apiGroups: [""]
-      resources: ["configmaps", "secrets"]
-      verbs: ["get", "list", "watch"]
-    - apiGroups: ["apps"]
-      resources: ["deployments"]
-      verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-    - apiGroups: ["tekton.dev"]
-      resources: ["pipelines", "pipelineruns", "tasks", "taskruns"]
-      verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
-# Auto-scaling (optional)
-autoscaling:
-  enabled: false
-  minReplicas: 1
-  maxReplicas: 3
-  targetCPUUtilizationPercentage: 80
-```
-
-#### Deploy with Custom Configuration
-
-```bash
-# Deploy
-helm install sentry ./helm/sentry \
-  --create-namespace \
-  --namespace sentry-system \
-  -f my-values.yaml
-
-# Upgrade existing deployment
-helm upgrade sentry ./helm/sentry \
-  --namespace sentry-system \
-  -f my-values.yaml
-```
-
-### 3. Environment-Specific Deployment
-
-#### Development Environment
-
-```bash
-# Deploy with development configuration
-helm install sentry-dev ./helm/sentry \
-  --create-namespace \
-  --namespace sentry-dev \
-  -f ./helm/sentry/values-dev.yaml \
-  --set secrets.githubToken="$GITHUB_TOKEN" \
-  --set secrets.gitlabToken="$GITLAB_TOKEN"
-```
-
-#### Production Environment
-
-```bash
-# Deploy with production configuration
-helm install sentry-prod ./helm/sentry \
-  --create-namespace \
-  --namespace sentry-prod \
-  -f ./helm/sentry/values-production.yaml \
-  --set secrets.githubToken="$GITHUB_TOKEN" \
-  --set secrets.gitlabToken="$GITLAB_TOKEN"
-```
-
-### 4. Helm Management Operations
-
-#### View Deployment Status
-
-```bash
-# List all Helm releases
-helm list -A
-
-# Check specific release status
-helm status sentry -n sentry-system
-
-# View release history
-helm history sentry -n sentry-system
-```
-
-#### Upgrade and Rollback
-
-```bash
-# Upgrade deployment
-helm upgrade sentry ./helm/sentry -n sentry-system
-
-# Rollback to previous version
-helm rollback sentry -n sentry-system
-
-# Rollback to specific version
-helm rollback sentry 2 -n sentry-system
-```
-
-#### Uninstall Deployment
-
-```bash
-# Uninstall Helm release
-helm uninstall sentry -n sentry-system
-
-# Delete namespace (optional)
-kubectl delete namespace sentry-system
-```
-
-### 5. Troubleshooting
-
-#### Common Issue Diagnosis
-
-```bash
-# Check Pod status
-kubectl describe pod -l app.kubernetes.io/name=sentry -n sentry-system
-
-# View container logs
-kubectl logs -f deployment/sentry -n sentry-system
-
-# Check configuration
-kubectl get configmap sentry-config -n sentry-system -o yaml
-
-# Check secrets
-kubectl get secret sentry-secrets -n sentry-system
-
-# Check RBAC permissions
-kubectl auth can-i --list --as=system:serviceaccount:sentry-system:sentry
-```
-
-#### Common Errors and Solutions
-
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `ImagePullBackOff` | Unable to pull image | Check image tag and repository permissions |
-| `CrashLoopBackOff` | Application startup failure | Check configuration file and environment variables |
-| `Authentication failed` | Invalid token | Verify GitHub/GitLab token permissions |
-| `Permission denied` | Insufficient RBAC permissions | Check ServiceAccount permission configuration |
-
-## 🔧 Method 2: Raw YAML Manifest Deployment
-
-If not using Helm, you can use raw Kubernetes YAML manifests:
-
-### 1. Prepare Configuration
-
-```bash
-# Copy environment variable template
-cp env.example .env
-
-# Edit environment variables
-vi .env
-```
-
-### 2. Create Secrets
+If you already have the required secrets, use this one-command deployment:
 
 ```bash
 # Create namespace
-kubectl apply -f k8s/01-namespace.yaml
+kubectl create namespace sentry-system
 
-# Create secrets
-kubectl create secret generic sentry-secrets \
-  --from-literal=github-token="your_github_token" \
-  --from-literal=gitlab-token="your_gitlab_token" \
-  -n sentry-system
+# Create GitHub/GitLab tokens secret
+kubectl create secret generic sentry-tokens \
+  --from-literal=github-token="$GITHUB_TOKEN" \
+  --from-literal=gitlab-token="$GITLAB_TOKEN" \
+  --namespace=sentry-system
+
+# Create image pull secret for GHCR
+kubectl create secret docker-registry ghcr-secret \
+  --docker-server=ghcr.io \
+  --docker-username=your_github_username \
+  --docker-password="$GITHUB_TOKEN" \
+  --namespace=sentry-system
+
+# Deploy with Helm
+helm install sentry-deployment helm/sentry \
+  --namespace sentry-system \
+  --set image.repository=ghcr.io/your_username/sentry \
+  --set image.tag=1.0.2 \
+  --set-json='imagePullSecrets=[{"name":"ghcr-secret"}]' \
+  --set config.github.username=your_github_username \
+  --set config.gitlab.username=your_gitlab_username \
+  --set secrets.create=false \
+  --set secrets.existingSecret=sentry-tokens \
+  --wait --timeout=300s
 ```
 
-### 3. Deploy Application
+## Detailed Deployment Steps
+
+### Step 1: Environment Preparation
 
 ```bash
-# Deploy all components in order
-kubectl apply -f k8s/02-secret.yaml
-kubectl apply -f k8s/03-configmap.yaml
-kubectl apply -f k8s/04-rbac.yaml
-kubectl apply -f k8s/05-deployment.yaml
+# Set variables
+export GITHUB_USERNAME="your_github_username"
+export GITLAB_USERNAME="your_gitlab_username"
+export IMAGE_TAG="1.0.2"
 
-# Or deploy all at once
-kubectl apply -f k8s/
+# Verify cluster access
+kubectl cluster-info
 ```
 
-### 4. Verify Deployment
+### Step 2: Create Namespace and Secrets
 
 ```bash
-kubectl get all -n sentry-system
+# Create dedicated namespace
+kubectl create namespace sentry-system
+
+# Create tokens secret
+kubectl create secret generic sentry-tokens \
+  --from-literal=github-token="$GITHUB_TOKEN" \
+  --from-literal=gitlab-token="$GITLAB_TOKEN" \
+  --namespace=sentry-system
+
+# Verify secret creation
+kubectl get secret sentry-tokens -n sentry-system -o yaml
 ```
 
-## 🔧 Method 3: Docker Deployment (Local Testing)
-
-Suitable for local development and testing:
-
-### 1. Build Image
+### Step 3: Configure Image Access (for Private Registry)
 
 ```bash
-# Build Docker image
-make docker
+# Create image pull secret
+kubectl create secret docker-registry ghcr-secret \
+  --docker-server=ghcr.io \
+  --docker-username="$GITHUB_USERNAME" \
+  --docker-password="$GITHUB_TOKEN" \
+  --namespace=sentry-system
 
-# Or manually build
-docker build -t sentry:latest .
+# Verify secret
+kubectl get secret ghcr-secret -n sentry-system
 ```
 
-### 2. Run Container
+### Step 4: Deploy Sentry via Helm
 
 ```bash
-# Create environment variable file
-cat > .env << EOF
-GITHUB_USERNAME=your_username
-GITHUB_TOKEN=your_github_token
-GITLAB_USERNAME=your_username
-GITLAB_TOKEN=your_gitlab_token
-EOF
+# Navigate to project directory
+cd /path/to/sentry
 
-# Run container
-docker run -d \
-  --name sentry \
-  --env-file .env \
-  -v $(pwd)/sentry.yaml:/app/sentry.yaml:ro \
-  -v ~/.kube/config:/root/.kube/config:ro \
-  sentry:latest -action=watch
+# Deploy with complete configuration
+helm install sentry-deployment helm/sentry \
+  --namespace sentry-system \
+  --set image.repository=ghcr.io/$GITHUB_USERNAME/sentry \
+  --set image.tag=$IMAGE_TAG \
+  --set-json='imagePullSecrets=[{"name":"ghcr-secret"}]' \
+  --set config.github.username=$GITHUB_USERNAME \
+  --set config.gitlab.username=$GITLAB_USERNAME \
+  --set secrets.create=false \
+  --set secrets.existingSecret=sentry-tokens \
+  --wait --timeout=300s
 ```
 
-## 📊 Monitoring and Maintenance
-
-### 1. Health Checks
+### Step 5: Deployment Verification
 
 ```bash
-# Check application status
-kubectl exec -it deployment/sentry -n sentry-system -- ./sentry -action=validate
+# Check deployment status
+kubectl get deployment sentry-deployment -n sentry-system
 
-# View configuration
-kubectl exec -it deployment/sentry -n sentry-system -- cat /app/sentry.yaml
+# Check pod status
+kubectl get pods -n sentry-system
+
+# Check service account and RBAC
+kubectl get serviceaccount sentry-deployment -n sentry-system
+kubectl get clusterrole sentry-deployment
+kubectl get clusterrolebinding sentry-deployment
+
+# Verify configuration
+kubectl exec deployment/sentry-deployment -n sentry-system -- \
+  sentry -action=validate -config=/etc/sentry/sentry.yaml
 ```
 
-### 2. Log Management
+## Post-Deployment Operations
+
+### Manual Trigger Test
 
 ```bash
-# Real-time log viewing
-kubectl logs -f deployment/sentry -n sentry-system
+# Manually trigger deployment
+kubectl exec deployment/sentry-deployment -n sentry-system -- \
+  sentry -action=trigger -config=/etc/sentry/sentry.yaml
 
-# View historical logs
-kubectl logs deployment/sentry -n sentry-system --previous
-
-# View logs for specific time period
-kubectl logs deployment/sentry -n sentry-system --since=1h
+# Check Tekton pipeline runs
+kubectl get pipelinerun -n tekton-rag --sort-by='.metadata.creationTimestamp'
 ```
 
-### 3. Performance Monitoring
+### Real-time Monitoring
 
 ```bash
-# View resource usage
-kubectl top pod -n sentry-system
+# View real-time logs
+kubectl logs -f deployment/sentry-deployment -n sentry-system
 
-# View events
-kubectl get events -n sentry-system --sort-by='.lastTimestamp'
+# Monitor specific events
+kubectl logs deployment/sentry-deployment -n sentry-system | grep "Repository change detected"
 ```
 
-## 🔒 Security Best Practices
+## Configuration Updates
 
-### 1. Secret Management
+### Updating Repository Configuration
 
-- Use Kubernetes Secrets to store sensitive information
-- Regularly rotate access tokens
-- Limit token permission scope
-- Consider using external secret management systems (like HashiCorp Vault)
+1. **Edit Helm values**:
+```bash
+# Edit values file
+vim helm/sentry/values.yaml
 
-### 2. RBAC Configuration
+# Or update via command line
+helm upgrade sentry-deployment helm/sentry \
+  --namespace sentry-system \
+  --set config.polling_interval=30 \
+  --reuse-values
+```
 
-- Use the principle of least privilege
-- Use different ServiceAccounts for different environments
-- Regularly review and update permissions
+2. **Update access tokens**:
+```bash
+# Update tokens secret
+kubectl delete secret sentry-tokens -n sentry-system
+kubectl create secret generic sentry-tokens \
+  --from-literal=github-token="$NEW_GITHUB_TOKEN" \
+  --from-literal=gitlab-token="$NEW_GITLAB_TOKEN" \
+  --namespace=sentry-system
 
-### 3. Network Security
+# Restart deployment to pick up new secrets
+kubectl rollout restart deployment/sentry-deployment -n sentry-system
+```
+
+### Adding New Repositories
+
+Edit `helm/sentry/values.yaml` and add new repository configuration:
 
 ```yaml
-# Network policy example
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: sentry-network-policy
-  namespace: sentry-system
-spec:
-  podSelector:
-    matchLabels:
-      app.kubernetes.io/name: sentry
-  policyTypes:
-  - Egress
-  egress:
-  - to: []
-    ports:
-    - protocol: TCP
-      port: 443  # HTTPS access to Git repositories
-    - protocol: TCP
-      port: 6443 # Kubernetes API
+repositories:
+  - name: "new-project"
+    group: "ai-blueprints"
+    monitor:
+      repo_url: "https://github.com/username/new-repo"
+      branches: ["main", "develop"]
+      repo_type: "github"
+      auth:
+        username: "placeholder_github_username"
+        token: "${GITHUB_TOKEN}"
+    deploy:
+      qa_repo_url: "https://gitlab.com/qa/deployment-repo"
+      qa_repo_branch: "main"
+      repo_type: "gitlab"
+      project_name: "new-project"
+      commands:
+        - "cd .tekton/new-project && export TMPDIR=/tmp/sentry && bash scripts/deploy.sh"
+      auth:
+        username: "placeholder_gitlab_username"
+        token: "${GITLAB_TOKEN}"
 ```
 
-## 🚀 Advanced Configuration
+Then upgrade the deployment:
+```bash
+helm upgrade sentry-deployment helm/sentry \
+  --namespace sentry-system \
+  --reuse-values
+```
 
-### 1. Multi-Cluster Deployment
+## Log Viewing and Debugging
+
+### Real-time Log Monitoring
 
 ```bash
-# Use different values files for different clusters
-helm install sentry-cluster1 ./helm/sentry -f values-cluster1.yaml
-helm install sentry-cluster2 ./helm/sentry -f values-cluster2.yaml
+# Follow all logs
+kubectl logs -f deployment/sentry-deployment -n sentry-system
+
+# Filter specific events
+kubectl logs deployment/sentry-deployment -n sentry-system | grep -E "(ERROR|WARN|Repository change detected)"
+
+# View last N lines
+kubectl logs deployment/sentry-deployment -n sentry-system --tail=50
 ```
 
-### 2. Auto-scaling
+### Structured Log Analysis
 
+Sentry uses structured logging. Key log patterns:
+
+```bash
+# Repository monitoring events
+[2025-09-18 08:42:35] INFO: New commit detected [repo=rag-project] [branch=dev] [old_sha=abc123] [new_sha=def456]
+
+# Deployment events  
+[2025-09-18 08:42:35] INFO: Starting group deployment [group=ai-blueprints] [strategy=parallel]
+
+# Command execution
+[2025-09-18 08:42:41] INFO: Command executed successfully [repo=rag-project] [step=1] [output_size=403]
+
+# Error events
+[2025-09-18 08:42:41] ERROR: Command execution failed [repo=rag-project] [error=exit status 1]
+```
+
+### Debug Mode
+
+Enable verbose logging:
+```bash
+kubectl exec deployment/sentry-deployment -n sentry-system -- \
+  sentry -action=watch -verbose -config=/etc/sentry/sentry.yaml
+```
+
+## Troubleshooting
+
+### Common Issues and Solutions
+
+#### 1. ImagePullBackOff Error
+
+**Problem**: Pod stuck in `ImagePullBackOff` state
+```bash
+kubectl describe pod -n sentry-system
+# Error: Failed to pull image "ghcr.io/username/sentry:1.0.0": unauthorized
+```
+
+**Solution**:
+```bash
+# Verify image exists and is accessible
+docker pull ghcr.io/username/sentry:1.0.0
+
+# Check/recreate image pull secret
+kubectl delete secret ghcr-secret -n sentry-system
+kubectl create secret docker-registry ghcr-secret \
+  --docker-server=ghcr.io \
+  --docker-username="$GITHUB_USERNAME" \
+  --docker-password="$GITHUB_TOKEN" \
+  --namespace=sentry-system
+
+# Restart deployment
+kubectl rollout restart deployment/sentry-deployment -n sentry-system
+```
+
+#### 2. Configuration Validation Failed
+
+**Problem**: Configuration validation errors
+```bash
+kubectl logs deployment/sentry-deployment -n sentry-system
+# FATAL: Config validation failed: polling_interval must be positive
+```
+
+**Solution**:
+```bash
+# Check current config
+kubectl get configmap sentry-deployment-config -n sentry-system -o yaml
+
+# Fix via Helm values update
+helm upgrade sentry-deployment helm/sentry \
+  --namespace sentry-system \
+  --set config.polling_interval=60 \
+  --reuse-values
+```
+
+#### 3. API Authentication Failed
+
+**Problem**: GitHub/GitLab API authentication failures
+```bash
+# Error: repository check failed: gitHub API error (status 401): Bad credentials
+```
+
+**Solution**:
+```bash
+# Verify tokens
+echo $GITHUB_TOKEN | cut -c1-10
+echo $GITLAB_TOKEN | cut -c1-10
+
+# Test API access
+curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
+
+# Update secrets
+kubectl delete secret sentry-tokens -n sentry-system
+kubectl create secret generic sentry-tokens \
+  --from-literal=github-token="$GITHUB_TOKEN" \
+  --from-literal=gitlab-token="$GITLAB_TOKEN" \
+  --namespace=sentry-system
+```
+
+#### 4. Tekton Command Execution Failed
+
+**Problem**: Deployment commands fail with permission or file system errors
+```bash
+# Error: mktemp: failed to create file via template '/tmp/tmp.XXXXXXXXXX.yaml': Read-only file system
+```
+
+**Solution**: Ensure commands set proper TMPDIR:
 ```yaml
-# Enable HPA
-autoscaling:
-  enabled: true
-  minReplicas: 1
-  maxReplicas: 5
-  targetCPUUtilizationPercentage: 70
-  targetMemoryUtilizationPercentage: 80
+commands:
+  - "cd .tekton/project && export TMPDIR=/tmp/sentry && bash scripts/deploy.sh"
 ```
 
-### 3. Persistent Storage (if needed)
+#### 5. RBAC Permission Denied
 
-```yaml
-# Use persistent volume for temporary files
-persistence:
-  enabled: true
-  storageClass: "fast-ssd"
-  size: 10Gi
-  mountPath: /tmp/sentry
+**Problem**: kubectl commands fail with permission errors
+```bash
+# Error: error when creating resource: User "system:serviceaccount:sentry-system:sentry-deployment" cannot create resource "pipelineruns"
 ```
 
-## 📝 Configuration Reference
+**Solution**:
+```bash
+# Check RBAC configuration
+kubectl get clusterrole sentry-deployment -o yaml
+kubectl get clusterrolebinding sentry-deployment -o yaml
 
-### Complete Helm Values Configuration
+# Verify service account
+kubectl get serviceaccount sentry-deployment -n sentry-system
+```
 
-See `helm/sentry/values.yaml` for detailed descriptions of all configurable options.
+### Health Check Commands
 
-### Environment Variable Reference
+```bash
+# Complete system health check
+echo "=== System Health Check ==="
 
-| Variable Name | Description | Required |
-|---------------|-------------|----------|
-| `GITHUB_USERNAME` | GitHub username | Yes |
-| `GITHUB_TOKEN` | GitHub access token | Yes |
-| `GITLAB_USERNAME` | GitLab username | Yes |
-| `GITLAB_TOKEN` | GitLab access token | Yes |
+echo "1. Pod Status:"
+kubectl get pods -n sentry-system
 
-### Configuration File Reference
+echo "2. Deployment Status:"
+kubectl get deployment sentry-deployment -n sentry-system
 
-See `sentry.yaml` for complete configuration file format and options.
+echo "3. Service Account & RBAC:"
+kubectl get serviceaccount sentry-deployment -n sentry-system
+kubectl get clusterrole sentry-deployment >/dev/null 2>&1 && echo "ClusterRole: OK" || echo "ClusterRole: MISSING"
+
+echo "4. Secrets:"
+kubectl get secret sentry-tokens -n sentry-system >/dev/null 2>&1 && echo "Tokens Secret: OK" || echo "Tokens Secret: MISSING"
+kubectl get secret ghcr-secret -n sentry-system >/dev/null 2>&1 && echo "Image Pull Secret: OK" || echo "Image Pull Secret: MISSING"
+
+echo "5. Configuration Validation:"
+kubectl exec deployment/sentry-deployment -n sentry-system -- \
+  sentry -action=validate -config=/etc/sentry/sentry.yaml
+```
+
+## Complete Environment Cleanup Steps
+
+### Manual Cleanup
+```bash
+echo "=== Sentry Environment Cleanup ==="
+
+# 1. Uninstall Helm release
+helm uninstall sentry-deployment -n sentry-system
+
+# 2. Delete namespace (will delete all resources within)
+kubectl delete namespace sentry-system
+
+# 3. Clean up RBAC resources (if created at cluster level)
+kubectl delete clusterrole sentry-deployment 2>/dev/null || true
+kubectl delete clusterrolebinding sentry-deployment 2>/dev/null || true
+
+# 4. Clean up Tekton resources (optional - be careful!)
+# kubectl delete pipelinerun -n tekton-rag -l app.kubernetes.io/name=container-deployment
+
+echo "Cleanup completed!"
+```
+
+### One-Click Cleanup Script
+```bash
+#!/bin/bash
+# save as cleanup-sentry.sh
+
+echo "=== Sentry Complete Cleanup ==="
+read -p "This will delete ALL Sentry resources. Continue? (y/N): " confirm
+
+if [[ $confirm == [yY] || $confirm == [yY][eE][sS] ]]; then
+    echo "Starting cleanup..."
+    
+    # Uninstall Helm release
+    helm uninstall sentry-deployment -n sentry-system 2>/dev/null || echo "Helm release not found"
+    
+    # Delete namespace
+    kubectl delete namespace sentry-system 2>/dev/null || echo "Namespace not found"
+    
+    # Clean up cluster-level RBAC
+    kubectl delete clusterrole sentry-deployment 2>/dev/null || echo "ClusterRole not found"
+    kubectl delete clusterrolebinding sentry-deployment 2>/dev/null || echo "ClusterRoleBinding not found"
+    
+    echo "Cleanup completed!"
+else
+    echo "Cleanup cancelled."
+fi
+```
+
+### Cleanup Considerations
+
+⚠️ **Important Notes**:
+
+1. **Namespace Deletion**: Deleting namespace will remove ALL resources within, including secrets
+2. **RBAC Cleanup**: ClusterRole and ClusterRoleBinding are cluster-level resources  
+3. **Tekton Resources**: Consider whether to clean up created PipelineRuns
+4. **Backup First**: Export important configurations before cleanup:
+   ```bash
+   # Backup configurations
+   kubectl get configmap sentry-deployment-config -n sentry-system -o yaml > sentry-config-backup.yaml
+   kubectl get secret sentry-tokens -n sentry-system -o yaml > sentry-secrets-backup.yaml
+   ```
+
+## Best Practices
+
+### Security
+
+1. **Token Management**: 
+   - Use environment variables for tokens
+   - Rotate tokens regularly
+   - Use least-privilege access
+
+2. **RBAC Configuration**:
+   - Grant minimal required permissions
+   - Use namespace-scoped roles when possible
+   - Regular audit of permissions
+
+3. **Image Security**:
+   - Use specific image tags (not `latest`)
+   - Scan images for vulnerabilities
+   - Use private registries for sensitive deployments
+
+### Monitoring
+
+1. **Log Management**:
+   - Centralized log aggregation (ELK, Grafana Loki)
+   - Set up log alerts for ERROR/FATAL events
+   - Regular log rotation
+
+2. **Health Monitoring**:
+   - Kubernetes liveness/readiness probes
+   - External monitoring of repository connectivity
+   - Tekton pipeline success rate monitoring
+
+### Maintenance
+
+1. **Regular Updates**:
+   - Update Sentry image tags
+   - Keep Helm charts updated
+   - Review and update configurations
+
+2. **Backup Strategy**:
+   - Export configurations before changes
+   - Document custom configurations
+   - Test restore procedures
+
+3. **Capacity Planning**:
+   - Monitor resource usage
+   - Plan for concurrent deployments
+   - Set appropriate timeouts and limits
 
 ---
 
-## 📞 Support and Help
-
-If you encounter issues during deployment:
-
-1. Check the [Troubleshooting section](#5-troubleshooting)
-2. Review application logs and Kubernetes events
-3. Refer to the project's main README documentation
-4. Submit an issue to the project repository
-
-Happy deploying! 🎉
+For more information, refer to:
+- [Architecture Design](architecture.md)
+- [Implementation Plan](implementation.md)
+- [Project Overview](README.md)
