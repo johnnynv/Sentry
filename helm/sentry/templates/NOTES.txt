@@ -8,21 +8,44 @@
   kubectl logs -f deployment/{{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }}
 
 4. Validate configuration:
-  kubectl exec -it deployment/{{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }} -- \
+  kubectl exec deployment/{{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }} -- \
     sentry -action=validate -config=/etc/sentry/sentry.yaml
 
 5. Manually trigger deployment:
-  kubectl exec -it deployment/{{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }} -- \
+  kubectl exec deployment/{{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }} -- \
     sentry -action=trigger -config=/etc/sentry/sentry.yaml
+
+6. View real-time monitoring logs:
+  kubectl logs -f deployment/{{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }}
+
+7. Check deployment health:
+  kubectl get pods -n {{ include "sentry.namespace" . }}
+  kubectl describe deployment {{ include "sentry.fullname" . }} -n {{ include "sentry.namespace" . }}
+
+Prerequisites for deployment:
+- Ensure GitHub and GitLab tokens are created as secrets
+- Configure imagePullSecrets if using private container registry (e.g., ghcr.io)
+- Verify RBAC permissions for target deployment namespaces
 
 {{- if .Values.secrets.create }}
 {{- if not .Values.secrets.githubToken }}
-WARNING: GitHub token not provided. Set secrets.githubToken in values.yaml
+WARNING: GitHub token not provided. Create secret manually:
+  kubectl create secret generic {{ include "sentry.fullname" . }}-tokens \
+    --namespace={{ include "sentry.namespace" . }} \
+    --from-literal=github-token="your_github_token" \
+    --from-literal=gitlab-token="your_gitlab_token"
 {{- end }}
 {{- if not .Values.secrets.gitlabToken }}
 WARNING: GitLab token not provided. Set secrets.gitlabToken in values.yaml
 {{- end }}
 {{- end }}
+
+For private registries (e.g., ghcr.io), create imagePullSecret:
+  kubectl create secret docker-registry ghcr-secret \
+    --namespace={{ include "sentry.namespace" . }} \
+    --docker-server=ghcr.io \
+    --docker-username=your_username \
+    --docker-password=your_token
 
 Configuration:
 - Namespace: {{ include "sentry.namespace" . }}

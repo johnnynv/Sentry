@@ -77,32 +77,70 @@ namespace:
 
 # Application configuration
 config:
-  # Monitoring configuration
-  monitor:
-    # Repository A (GitHub example)
-    repo_a:
-      type: "github"
-      url: "https://github.com/NVIDIA-AI-Blueprints/rag"
-      branch: "main"
-      token: "${GITHUB_TOKEN}"
-    
-    # Repository B (GitLab example)
-    repo_b:
-      type: "gitlab"
-      url: "https://gitlab-master.nvidia.com/cloud-service-qa/Blueprint/blueprint-github-test"
-      branch: "main"
-      token: "${GITLAB_TOKEN}"
-    
-    # Polling configuration
-    poll:
-      interval: 30  # Poll interval in seconds
-      timeout: 10   # Request timeout in seconds
+  # Polling interval in seconds (minimum 60)
+  polling_interval: 60
+  
+  # Global group configurations
+  groups:
+    ai-blueprints:
+      execution_strategy: "parallel"  # parallel | sequential
+      max_parallel: 3
+      continue_on_error: true
+      global_timeout: 900  # 15 minutes
+  
+  # Repository configurations
+  repositories:
+    - name: "rag-project"
+      group: "ai-blueprints"  # Optional group assignment
+      monitor:
+        repo_url: "https://github.com/johnnynv/rag"
+        branches: ["main", "dev"]  # Multiple branches supported
+        repo_type: "github"
+        auth:
+          username: "placeholder_github_username"
+          token: "${GITHUB_TOKEN}"
+      deploy:
+        qa_repo_url: "https://gitlab-master.nvidia.com/cloud-service-qa/Blueprint/blueprint-github-test"
+        qa_repo_branch: "rag-tekton-workflow"
+        repo_type: "gitlab"
+        project_name: "rag"
+        commands:
+          - "cd .tekton/rag && export TMPDIR=/tmp/sentry && bash scripts/container-deployment-pipeline-onclick.sh"
+        auth:
+          username: "placeholder_gitlab_username"
+          token: "${GITLAB_TOKEN}"
 
-  # Deployment configuration
-  deploy:
-    namespace: "tekton-pipelines"  # Target namespace for Tekton resources
-    tmp_dir: "/tmp/sentry"         # Temporary directory
-    cleanup: true                  # Auto-cleanup temporary files
+    - name: "chatbot-project"
+      group: "ai-blueprints"
+      monitor:
+        repo_url: "https://github.com/johnnynv/rag"
+        branches: ["main"]
+        repo_type: "github"
+        auth:
+          username: "placeholder_github_username"
+          token: "${GITHUB_TOKEN}"
+      deploy:
+        qa_repo_url: "https://gitlab-master.nvidia.com/cloud-service-qa/Blueprint/blueprint-github-test"
+        qa_repo_branch: "rag-tekton-workflow"
+        repo_type: "gitlab"
+        project_name: "chatbot"
+        commands:
+          - "cd .tekton/chatbot && export TMPDIR=/tmp/sentry && bash scripts/container-deployment-pipeline-onclick.sh"
+        auth:
+          username: "placeholder_gitlab_username"
+          token: "${GITLAB_TOKEN}"
+
+  # Global settings
+  global:
+    tmp_dir: "/tmp/sentry"
+    cleanup: true
+    timeout: 300
+
+  # API credentials (will be set via command line parameters)
+  github:
+    username: "johnnynv"  # Default GitHub username, override with --set config.github.username=your_username
+  gitlab:
+    username: "johnnyj"   # Default GitLab username, override with --set config.gitlab.username=your_username
 
 # Secret configuration
 secrets:

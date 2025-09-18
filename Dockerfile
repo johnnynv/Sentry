@@ -33,18 +33,25 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o sentry .
 
 # Stage 2: Runtime stage
-FROM alpine:3.18
+FROM ubuntu:22.04
 
-# Install runtime dependencies
-RUN apk add --no-cache \
+# Install runtime dependencies (non-interactive)
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+RUN apt-get update && apt-get install -y \
     ca-certificates \
     git \
-    kubectl \
+    curl \
     tzdata \
-    && rm -rf /var/cache/apk/*
+    bash \
+    coreutils \
+    && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && chmod +x kubectl \
+    && mv kubectl /usr/local/bin/ \
+    && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN adduser -D -s /bin/sh sentry
+RUN useradd -r -s /bin/bash -m sentry
 
 # Set working directory
 WORKDIR /app

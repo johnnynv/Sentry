@@ -9,9 +9,57 @@ metadata:
 data:
   sentry.yaml: |
     # Sentry configuration file
-    monitor:
-      {{- toYaml .Values.config.monitor | nindent 6 }}
+    polling_interval: {{ .Values.config.polling_interval | default 60 }}
     
-    # Deployment configuration
-    deploy:
-      {{- toYaml .Values.config.deploy | nindent 6 }}
+    {{- if .Values.config.groups }}
+    # Global group configurations
+    groups:
+      {{- toYaml .Values.config.groups | nindent 6 }}
+    {{- end }}
+    
+    # Repository configurations
+    repositories:
+    {{- range .Values.config.repositories }}
+      - name: {{ .name | quote }}
+        {{- if .group }}
+        group: {{ .group | quote }}
+        {{- end }}
+        monitor:
+          repo_url: {{ .monitor.repo_url | quote }}
+          branches:
+            {{- toYaml .monitor.branches | nindent 12 }}
+          repo_type: {{ .monitor.repo_type | quote }}
+          auth:
+            {{- if eq .monitor.repo_type "github" }}
+            username: {{ $.Values.config.github.username | quote }}
+            {{- else if eq .monitor.repo_type "gitlab" }}
+            username: {{ $.Values.config.gitlab.username | quote }}
+            {{- else }}
+            username: {{ .monitor.auth.username | quote }}
+            {{- end }}
+            token: {{ .monitor.auth.token | quote }}
+        deploy:
+          qa_repo_url: {{ .deploy.qa_repo_url | quote }}
+          qa_repo_branch: {{ .deploy.qa_repo_branch | quote }}
+          repo_type: {{ .deploy.repo_type | quote }}
+          project_name: {{ .deploy.project_name | quote }}
+          commands:
+            {{- range .deploy.commands }}
+            - {{ . | quote }}
+            {{- end }}
+          auth:
+            {{- if eq .deploy.repo_type "github" }}
+            username: {{ $.Values.config.github.username | quote }}
+            {{- else if eq .deploy.repo_type "gitlab" }}
+            username: {{ $.Values.config.gitlab.username | quote }}
+            {{- else }}
+            username: {{ .deploy.auth.username | quote }}
+            {{- end }}
+            token: {{ .deploy.auth.token | quote }}
+    {{- end }}
+    
+    # Global settings
+    global:
+      tmp_dir: {{ .Values.config.global.tmp_dir | default "/tmp/sentry" | quote }}
+      cleanup: {{ .Values.config.global.cleanup | default true }}
+      timeout: {{ .Values.config.global.timeout | default 300 }}

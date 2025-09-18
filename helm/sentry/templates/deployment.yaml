@@ -57,7 +57,7 @@ spec:
               key: gitlab-token
         {{- end }}
         - name: SENTRY_TMP_DIR
-          value: {{ .Values.config.deploy.tmp_dir | quote }}
+          value: {{ .Values.config.global.tmp_dir | default "/tmp/sentry" | quote }}
         {{- with .Values.env }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -66,7 +66,7 @@ spec:
           mountPath: /etc/sentry
           readOnly: true
         - name: tmp
-          mountPath: {{ .Values.config.deploy.tmp_dir }}
+          mountPath: {{ .Values.config.global.tmp_dir | default "/tmp/sentry" }}
         {{- with .Values.extraVolumeMounts }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

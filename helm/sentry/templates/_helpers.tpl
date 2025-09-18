@@ -84,11 +84,7 @@ Create the name of the configmap to use
 Create the namespace name
 */}}
 {{- define "sentry.namespace" -}}
-{{- if .Values.namespace.create }}
-{{- default .Values.namespace.name .Release.Namespace }}
-{{- else }}
 {{- .Release.Namespace }}
-{{- end }}
 {{- end }}
 
 {{/*
